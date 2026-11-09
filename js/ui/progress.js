@@ -3,7 +3,9 @@
 
 import { useState } from '../../vendor/preact-htm.js';
 import * as repo from '../repo.js';
-import { Analytics, DayStatus, Fmt, Measure, RateStatus, isSunday, isoDate, parseIsoDate, weekStart } from '../domain.js';
+import {
+  Analytics, DayStatus, ExerciseKind, Fmt, Measure, RateStatus, isSunday, isWalking, isoDate, parseIsoDate, stepsGoalFor, stepsStatus, weekStart,
+} from '../domain.js';
 import { app, push } from './state.js';
 import {
   html, Icon, TopBar, Card, CardHeader, MeterBar, StatTile, StatusCell, StatusLegend, Segmented, Dialog, NumberDialog,
@@ -28,8 +30,12 @@ function progressState(today) {
   const plannedSets = repo.plannedSetsByTemplate(planItems);
   const order = repo.rotation(from, to, today);
   const logs = repo.dailyLogMap();
-  const isRest = (d) => isSunday(d) || logs.get(d)?.restDay === true;
-  const statusFor = (d) => repo.dayStatus(d, order, plannedSets, today);
+  const walking = isWalking(s);
+  const isRest = (d) => !walking && (isSunday(d) || logs.get(d)?.restDay === true);
+  // The walking plan is judged on the step goal; the gym plan on its workouts.
+  const statusFor = (d) => (walking
+    ? stepsStatus(s, d, today, logs.get(d)?.steps ?? null)
+    : repo.dayStatus(d, order, plannedSets, today));
 
   // Consistency: the last 8 Mon–Sun weeks since the program started, oldest first.
   const programWeek = weekStart(s.programStartEpochDay);
@@ -50,22 +56,25 @@ function progressState(today) {
   const weighInDays = new Set(weights.map((w) => w.epochDay));
   const trainingDays = days.filter((d) => !isRest(d));
   const count = (pred) => days.filter(pred).length;
+  const strengthWeeks = Math.max(1, Math.round(days.length / 7));
   const adherence = days.length === 0 ? [] : [
-    ['Workouts (Mon–Sat)', trainingDays.filter((d) => statusFor(d) === DayStatus.DONE).length, trainingDays.length],
+    walking
+      ? [`Strength sessions (${s.strengthSessionsPerWeek} a week)`, repo.workoutDays(adhFrom, today - 1), s.strengthSessionsPerWeek * strengthWeeks]
+      : ['Workouts (Mon–Sat)', trainingDays.filter((d) => statusFor(d) === DayStatus.DONE).length, trainingDays.length],
     ['Morning weigh-in', count((d) => weighInDays.has(d)), days.length],
     [`Protein ≥ ${s.proteinGrams} g`, count((d) => (totalsByDay.get(d)?.protein ?? 0) >= s.proteinGrams), days.length],
     ['Calories on target', count((d) => { const k = totalsByDay.get(d)?.kcal ?? 0; return k >= s.dailyCalories * 0.9 && k <= s.dailyCalories * 1.05; }), days.length],
     [`Water ≥ ${Fmt.num(s.waterLitersMin)} L`, count((d) => (logs.get(d)?.waterMl ?? 0) >= s.waterLitersMin * 1000), days.length],
-    [`Steps ≥ ${Fmt.int(s.dailyStepsMin)}`, count((d) => (logs.get(d)?.steps ?? 0) >= s.dailyStepsMin), days.length],
+    [walking ? 'Step goal' : `Steps ≥ ${Fmt.int(s.dailyStepsMin)}`, count((d) => (logs.get(d)?.steps ?? 0) >= stepsGoalFor(s, d)), days.length],
     [`Sleep ≥ ${Fmt.num(s.sleepHoursMin)} h`, count((d) => (logs.get(d)?.sleepHours ?? 0) >= s.sleepHoursMin), days.length],
-  ];
+  ].filter((r) => r[2] > 0);
 
   const waists = measurements.filter((m) => m.waistCm != null);
   const latestWaist = waists[waists.length - 1] ?? null;
   const firstWaist = waists[0] ?? null;
   const manualBf = [...measurements].reverse().find((m) => m.bodyFatPercent != null) ?? null;
-  const navyBase = [...measurements].reverse().find((m) => m.waistCm != null && m.neckCm != null) ?? null;
-  const navy = navyBase ? Analytics.navyBodyFatMale(s.heightCm, navyBase.waistCm, navyBase.neckCm) : null;
+  const navyBase = [...measurements].reverse().find((m) => Analytics.navyBodyFat(s, m) != null) ?? null;
+  const navy = navyBase ? Analytics.navyBodyFat(s, navyBase) : null;
   let bodyFat = null;
   let bodyFatSource = null;
   if (manualBf && (!navyBase || manualBf.epochDay >= navyBase.epochDay)) {
@@ -77,16 +86,20 @@ function progressState(today) {
   }
 
   const measureOf = (id) => repo.exercise(id)?.measure ?? Measure.REPS;
-  const lifts = Analytics.liftChanges(repo.setsFor(KEY_LIFTS), measureOf)
+  // The walking plan's key lifts are the compound exercises in its strength sessions.
+  const keyLifts = walking
+    ? [...new Set(planItems.filter((p) => p.kind === ExerciseKind.COMPOUND).map((p) => p.exerciseId))]
+    : KEY_LIFTS;
+  const lifts = Analytics.liftChanges(repo.setsFor(keyLifts), measureOf)
     .map((l) => ({ ...l, name: repo.exercise(l.exerciseId)?.name ?? l.exerciseId, measure: measureOf(l.exerciseId) }))
-    .sort((a, b) => KEY_LIFTS.indexOf(a.exerciseId) - KEY_LIFTS.indexOf(b.exerciseId));
+    .sort((a, b) => keyLifts.indexOf(a.exerciseId) - keyLifts.indexOf(b.exerciseId));
 
   const currentAverage = Analytics.currentAverage(weights);
   const sortedPct = lifts.map((l) => l.percent).sort((a, b) => a - b);
   const medianLift = sortedPct.length ? sortedPct[Math.floor(sortedPct.length / 2)] : null;
   const waistChange = latestWaist && firstWaist && latestWaist.epochDay !== firstWaist.epochDay ? latestWaist.waistCm - firstWaist.waistCm : null;
-  const criteria = [
-    { key: 'WEIGHT', label: `Weight ${Fmt.num(s.targetWeightMinKg)}–${Fmt.num(s.targetWeightMaxKg)} kg`,
+  const allCriteria = [
+    { key: 'WEIGHT', label: `Weight ${Fmt.range(s.targetWeightMinKg, s.targetWeightMaxKg)}`,
       detail: currentAverage != null ? `7-day average ${Fmt.kg(currentAverage)}` : 'No weigh-ins yet', met: currentAverage != null ? currentAverage <= s.targetWeightMaxKg : null },
     { key: 'BODY_FAT', label: `Body fat about ${Fmt.num(s.targetBodyFatPercent)}–${Fmt.num(s.targetBodyFatPercent + 1)}%`,
       detail: bodyFat != null ? `Latest ${Fmt.num(bodyFat)}%` : 'Log body fat, or waist + neck for an estimate', met: bodyFat != null ? bodyFat <= s.targetBodyFatPercent + 1 : null },
@@ -97,9 +110,12 @@ function progressState(today) {
     { key: 'DEFINITION', label: 'Chest, shoulder and arm definition improved', detail: 'Compare your progress photos', met: s.definitionImproved, manual: true },
     { key: 'ABS', label: 'Abs visibly more defined', detail: 'Compare your progress photos', met: s.absMoreDefined, manual: true },
   ];
+  // The walking plan's goal is the weight (and waist); body fat only counts when a target is set.
+  const criteria = allCriteria.filter((c) => (c.key !== 'BODY_FAT' || s.targetBodyFatPercent > 0)
+    && (!walking || ['WEIGHT', 'WAIST', 'BODY_FAT'].includes(c.key)));
   const phaseStart = s.phase === 2 ? s.phase2StartEpochDay ?? s.programStartEpochDay : s.programStartEpochDay;
   return {
-    s, today, weights, trend: Analytics.trend(weights), cut: Analytics.cutProgress(s, weights, today),
+    s, walking, today, weights, trend: Analytics.trend(weights), cut: Analytics.cutProgress(s, weights, today),
     rate: Analytics.assessRate(s, weights, today), measurements, latestWaist, firstWaist, bodyFat, bodyFatSource,
     consistency, workoutsDone, workoutsPlanned, adherence, adherenceDays: days.length, lifts,
     maintenance: Analytics.estimateMaintenance(totals, weights, today), criteria,
@@ -111,11 +127,12 @@ export function ProgressScreen() {
   const p = progressState(app.today);
   const [dialog, setDialog] = useState(null);
   const s = p.s;
-  const suggested = Math.round((p.maintenance != null ? p.maintenance + 150 : s.dailyCalories + 350) / 50) * 50;
+  const suggested = Math.round((p.maintenance != null ? p.maintenance + (p.walking ? 0 : 150) : s.dailyCalories + (p.walking ? 300 : 350)) / 50) * 50;
   return html`
     <${TopBar} title="Progress" />
     <main class="content">
       ${s.phase === 1 ? html`<${CutCard} p=${p} onPhase2=${() => setDialog({ type: 'phase2' })} />` : html`<${BuildCard} p=${p} />`}
+      ${p.walking && html`<${PlanNotesCard} s=${s} />`}
 
       ${p.rate.status !== RateStatus.TARGET_REACHED && html`<${Card}>
         <${CardHeader} title="Weekly rate" icon="trend" />
@@ -128,16 +145,18 @@ export function ProgressScreen() {
       <${ConsistencyCard} p=${p} />
       <${HabitsCard} p=${p} />
       <${StrengthCard} p=${p} />
-      ${s.phase === 1 ? html`<${CriteriaCard} p=${p} onPhase2=${() => setDialog({ type: 'phase2' })} />` : html`<${PrioritiesCard} />`}
+      ${s.phase === 1 ? html`<${CriteriaCard} p=${p} onPhase2=${() => setDialog({ type: 'phase2' })} />` : !p.walking && html`<${PrioritiesCard} />`}
       <${MaintenanceCard} p=${p} />
       <${TimelineCard} p=${p} />
     </main>
 
     ${dialog?.type === 'weight' && html`<${WeighInDialog} entry=${dialog.entry} today=${p.today} onDismiss=${() => setDialog(null)} />`}
-    ${dialog?.type === 'measure' && html`<${MeasurementDialog} entry=${dialog.entry} today=${p.today} heightCm=${s.heightCm} onDismiss=${() => setDialog(null)} />`}
-    ${dialog?.type === 'phase2' && html`<${NumberDialog} title="Start Phase 2: lean muscle building" label="Daily calories" suffix="kcal" decimal=${false}
+    ${dialog?.type === 'measure' && html`<${MeasurementDialog} entry=${dialog.entry} today=${p.today} s=${s} onDismiss=${() => setDialog(null)} />`}
+    ${dialog?.type === 'phase2' && html`<${NumberDialog} title=${p.walking ? 'Start maintenance' : 'Start Phase 2: lean muscle building'} label="Daily calories" suffix="kcal" decimal=${false}
       initial=${String(suggested)}
-      message=${`${p.maintenance != null ? `Your estimated maintenance is about ${Fmt.kcal(p.maintenance)}. ` : 'Start roughly 300–400 kcal above your cut. '}Move to maintenance or a small surplus, keep protein at ${s.proteinGrams} g, and aim for slow gain. Extra calories go mostly to carbs. You can change this any time in Settings.`}
+      message=${p.walking
+        ? `${p.maintenance != null ? `Your estimated maintenance is about ${Fmt.kcal(p.maintenance)}. ` : 'Start roughly 250–350 kcal above your fat-loss calories. '}Eat around maintenance to hold your new weight, keep protein at ${s.proteinGrams} g and keep walking. Extra calories go mostly to carbs. You can change this any time in Settings.`
+        : `${p.maintenance != null ? `Your estimated maintenance is about ${Fmt.kcal(p.maintenance)}. ` : 'Start roughly 300–400 kcal above your cut. '}Move to maintenance or a small surplus, keep protein at ${s.proteinGrams} g, and aim for slow gain. Extra calories go mostly to carbs. You can change this any time in Settings.`}
       validate=${(v) => (v >= 1500 && v <= 4500 ? null : 'Enter 1,500–4,500 kcal')}
       onDismiss=${() => setDialog(null)}
       onConfirm=${(calories) => {
@@ -158,14 +177,14 @@ function CutCard({ p, onPhase2 }) {
   const reached = p.rate.status === RateStatus.TARGET_REACHED;
   const pace = `${Fmt.num(s.targetWeightLossMinKgPerWeek)}–${Fmt.num(s.targetWeightLossMaxKgPerWeek)} kg/week`;
   return html`<${Card}>
-    <${SectionLabel}>Phase 1 · Cut · Week ${cut.weekNumber}<//>
+    <${SectionLabel}>${p.walking ? `Fat loss · Week ${cut.weekNumber}` : `Phase 1 · Cut · Week ${cut.weekNumber}`}<//>
     ${reached ? html`
       <div class="big mt6">Target reached</div>
       <p class="small mt4">7-day average ${cut.currentAverageKg != null ? Fmt.kg(cut.currentAverageKg) : '—'}. Don't keep cutting automatically.</p>
-      <div class="mt12"><button class="btn" onClick=${onPhase2}>Start Phase 2</button></div>`
+      <div class="mt12"><button class="btn" onClick=${onPhase2}>${p.walking ? 'Start maintenance' : 'Start Phase 2'}</button></div>`
     : html`
       <div class="row bottom mt6"><span class="huge">${cut.remainingKg != null ? Fmt.num(cut.remainingKg) : '—'}</span><span class="ink2" style="padding-bottom:5px">kg to go</span></div>
-      <p class="small">${cut.currentAverageKg != null ? `7-day average ${Fmt.kg(cut.currentAverageKg)} · ` : ''}target ${Fmt.num(s.targetWeightMinKg)}–${Fmt.num(s.targetWeightMaxKg)} kg</p>
+      <p class="small">${cut.currentAverageKg != null ? `7-day average ${Fmt.kg(cut.currentAverageKg)} · ` : ''}target ${Fmt.range(s.targetWeightMinKg, s.targetWeightMaxKg)}</p>
       <div class="mt10"><${MeterBar} fraction=${cut.fraction} /></div>
       <div class="row tiny mt4"><span class="grow">Start ${Fmt.num(s.startWeightKg)} kg</span><span>${Math.floor(cut.fraction * 100)}% of the way</span><span class="grow" style="text-align:right">Goal ${Fmt.num(s.targetWeightMaxKg)} kg</span></div>
       <p class="small mt10">${cut.weekNumber <= 4
@@ -179,9 +198,11 @@ function BuildCard({ p }) {
   const { s } = p;
   const avg = Analytics.currentAverage(p.weights);
   return html`<${Card}>
-    <${SectionLabel}>Phase 2 · Lean muscle building · Week ${p.weeksInPhase}<//>
+    <${SectionLabel}>${p.walking ? `Maintenance · Week ${p.weeksInPhase}` : `Phase 2 · Lean muscle building · Week ${p.weeksInPhase}`}<//>
     <div class="row bottom mt6"><span class="huge">${avg != null ? Fmt.num(avg) : '—'}</span><span class="ink2" style="padding-bottom:5px">kg 7-day avg</span></div>
-    <p class="small mt6">Aim for slow gain of ${Fmt.num(s.phase2GainMinKgPerWeek, 2)}–${Fmt.num(s.phase2GainMaxKgPerWeek, 2)} kg/week at ${Fmt.kcal(s.dailyCalories)}, keeping visible definition.</p>
+    <p class="small mt6">${p.walking
+      ? `Hold your weight steady at ${Fmt.kcal(s.dailyCalories)}, keep walking and keep protein at ${s.proteinGrams} g.`
+      : `Aim for slow gain of ${Fmt.num(s.phase2GainMinKgPerWeek, 2)}–${Fmt.num(s.phase2GainMaxKgPerWeek, 2)} kg/week at ${Fmt.kcal(s.dailyCalories)}, keeping visible definition.`}</p>
   <//>`;
 }
 
@@ -223,20 +244,22 @@ function WaistCard({ p, onEdit, onAdd }) {
   const waists = p.measurements.filter((m) => m.waistCm != null);
   const change = latestWaist && firstWaist && latestWaist.epochDay !== firstWaist.epochDay ? latestWaist.waistCm - firstWaist.waistCm : null;
   return html`<${Card}>
-    <${CardHeader} title="Waist & body fat" subtitle="Measure weekly at the navel, relaxed, same time of day"
+    <${CardHeader} title="Waist & body fat" subtitle=${s.sex === 'FEMALE'
+      ? 'Measure weekly at the narrowest point of your waist, relaxed, same time of day'
+      : 'Measure weekly at the navel, relaxed, same time of day'}
       trailing=${html`<button class="btn text" onClick=${onAdd}>Log</button>`} />
     <div class="row top mt10">
       <${StatTile} label="Waist" value=${latestWaist ? Fmt.num(latestWaist.waistCm) : '—'} unit="cm"
         delta=${change != null ? `${Fmt.signed(change)} cm since start` : null} deltaGood=${change != null && change < 0} />
       <${StatTile} label="Body fat" value=${p.bodyFat != null ? Fmt.num(p.bodyFat) : '—'} unit="%"
-        delta=${p.bodyFatSource ?? `Estimated ${Fmt.num(s.estimatedBodyFatPercent)}% at start`} />
+        delta=${p.bodyFatSource ?? (s.estimatedBodyFatPercent > 0 ? `Estimated ${Fmt.num(s.estimatedBodyFatPercent)}% at start` : `Log waist, neck${s.sex === 'FEMALE' ? ' and hip' : ''} for an estimate`)} />
     </div>
     ${waists.length >= 2 && html`<div class="mt10"><${LineChart} label=${`Waist trend. Latest ${Fmt.num(waists[waists.length - 1].waistCm)} cm.`}
       series=${[{ points: waists.map((m) => ({ x: m.epochDay, y: m.waistCm })), cls: 'avg', dots: true }]} /></div>`}
     ${p.measurements.length > 0 && html`<div class="mt10">${[...p.measurements].reverse().slice(0, 8).map((m) => html`
       <button class="list-row" style="padding:8px 0" onClick=${() => onEdit(m)}>
         <span class="main"><div class="title">${Fmt.date(m.epochDay)}</div>
-          <div class="detail">${[m.waistCm != null && `Waist ${Fmt.num(m.waistCm)} cm`, m.neckCm != null && `Neck ${Fmt.num(m.neckCm)} cm`, m.bodyFatPercent != null && `${Fmt.num(m.bodyFatPercent)}% BF`].filter(Boolean).join(' · ')}</div></span>
+          <div class="detail">${[m.waistCm != null && `Waist ${Fmt.num(m.waistCm)} cm`, m.hipCm != null && `Hip ${Fmt.num(m.hipCm)} cm`, m.neckCm != null && `Neck ${Fmt.num(m.neckCm)} cm`, m.bodyFatPercent != null && `${Fmt.num(m.bodyFatPercent)}% BF`].filter(Boolean).join(' · ')}</div></span>
       </button>`)}</div>`}
   <//>`;
 }
@@ -244,7 +267,8 @@ function WaistCard({ p, onEdit, onAdd }) {
 function ConsistencyCard({ p }) {
   const pct = p.workoutsPlanned ? Math.round((p.workoutsDone / p.workoutsPlanned) * 100) : 0;
   return html`<${Card}>
-    <${CardHeader} title="Workout consistency" icon="dumbbell" subtitle="Last 8 weeks · Sundays are rest, never missed" />
+    <${CardHeader} title=${p.walking ? 'Step goal' : 'Workout consistency'} icon=${p.walking ? 'steps' : 'dumbbell'}
+      subtitle=${p.walking ? 'Last 8 weeks · each day against that week’s step goal' : 'Last 8 weeks · Sundays are rest, never missed'} />
     ${p.consistency.length === 0
       ? html`<p class="small mt10">Your first training days will appear here.</p>`
       : html`<div class="consistency mt12">
@@ -252,7 +276,9 @@ function ConsistencyCard({ p }) {
           ${p.consistency.map((r) => html`<span class="lbl">${Fmt.shortDate(r.weekStart)}</span>${r.days.map((st) => html`<${StatusCell} status=${st} />`)}`)}
         </div>
         <div class="mt10"><${StatusLegend} /></div>
-        ${p.workoutsPlanned > 0 && html`<p class="small mt8">${p.workoutsDone} of ${p.workoutsPlanned} planned workouts done (${pct}%).</p>`}`}
+        ${p.workoutsPlanned > 0 && html`<p class="small mt8">${p.walking
+          ? `Step goal hit on ${p.workoutsDone} of ${p.workoutsPlanned} days (${pct}%).`
+          : `${p.workoutsDone} of ${p.workoutsPlanned} planned workouts done (${pct}%).`}</p>`}`}
   <//>`;
 }
 
@@ -274,7 +300,9 @@ function StrengthCard({ p }) {
   return html`<${Card}>
     <${CardHeader} title="Strength" icon="trophy" subtitle="Best estimated 1-rep max: first 2 vs last 2 sessions" />
     ${p.lifts.length === 0
-      ? html`<p class="small mt10">After four sessions of a key lift (bench, incline, shoulder press, pull-ups, rows, squats, RDL) you'll see whether strength is holding during the cut.</p>`
+      ? html`<p class="small mt10">${p.walking
+          ? 'After four strength sessions with an exercise you\'ll see whether your strength is holding while you lose fat.'
+          : 'After four sessions of a key lift (bench, incline, shoulder press, pull-ups, rows, squats, RDL) you\'ll see whether strength is holding during the cut.'}</p>`
       : html`<div class="mt8">${p.lifts.map((l) => {
           const unit = l.measure === Measure.SECONDS ? 's' : 'kg';
           return html`<button class="list-row" style="padding:8px 0" onClick=${() => push({ name: 'history', exerciseId: l.exerciseId })}>
@@ -289,7 +317,7 @@ function StrengthCard({ p }) {
 function CriteriaCard({ p, onPhase2 }) {
   const toggle = (key) => repo.updateSettings((s) => (key === 'DEFINITION' ? { ...s, definitionImproved: !s.definitionImproved } : { ...s, absMoreDefined: !s.absMoreDefined }));
   return html`<${Card} class="flush">
-    <div class="pad"><${CardHeader} title="Phase 1 is complete when…" subtitle="README section 10" /></div>
+    <div class="pad"><${CardHeader} title=${p.walking ? 'Goal reached when…' : 'Phase 1 is complete when…'} subtitle=${p.walking ? 'Then move to maintenance' : 'README section 10'} /></div>
     <div class="mt6">${p.criteria.map((c) => {
       const icon = c.manual ? (c.met ? 'checkSquare' : 'square') : c.met ? 'checkCircle' : 'circle';
       const row = html`<span class=${`check ${c.met ? 'done' : ''}`} style=${c.met === null ? 'opacity:.5' : ''}><${Icon} name=${icon} /></span>
@@ -300,7 +328,7 @@ function CriteriaCard({ p, onPhase2 }) {
     })}</div>
     <div class="pad row mt8">
       <button class="btn outline small" onClick=${() => push({ name: 'compare' })}>Compare photos</button>
-      ${p.criteria[0].met && html`<button class="btn small" onClick=${onPhase2}>Start Phase 2</button>`}
+      ${p.criteria[0].met && html`<button class="btn small" onClick=${onPhase2}>${p.walking ? 'Start maintenance' : 'Start Phase 2'}</button>`}
     </div>
   <//>`;
 }
@@ -329,6 +357,18 @@ function MaintenanceCard({ p }) {
 
 function TimelineCard({ p }) {
   const weeks = Math.floor(Math.max(0, p.today - p.s.programStartEpochDay) / 7);
+  if (p.walking) {
+    const s = p.s;
+    const toLose = Math.max(0, s.startWeightKg - s.targetWeightMaxKg);
+    const fast = Math.ceil(toLose / s.targetWeightLossMaxKgPerWeek);
+    const slow = Math.ceil(toLose / s.targetWeightLossMinKgPerWeek);
+    const months = (w) => Math.max(1, Math.round(w / 4.35));
+    return html`<${Card}>
+      <${CardHeader} title="Expected timeline" subtitle=${`Week ${weeks + 1} since you started`} />
+      <p class="mt10">About ${fast}–${slow} weeks (${months(fast) === months(slow) ? months(fast) : `${months(fast)}–${months(slow)}`} months) to lose ${Fmt.num(toLose)} kg at ${Fmt.num(s.targetWeightLossMinKgPerWeek)}–${Fmt.num(s.targetWeightLossMaxKgPerWeek)} kg a week.</p>
+      <p class="small mt6">Lose it gradually while keeping good nutrition, energy and muscle.</p>
+    <//>`;
+  }
   return html`<${Card}>
     <${CardHeader} title="Transformation timeline" subtitle=${`Week ${weeks + 1} since you started`} />
     <div class="stack s6 mt10">
@@ -336,6 +376,21 @@ function TimelineCard({ p }) {
         .map(([w, t]) => html`<div class="row"><span class=${weeks >= w ? 'good-text' : 'muted'}><${Icon} name=${weeks >= w ? 'checkCircle' : 'circle'} size=${18} /></span><span>${t}</span></div>`)}
       <p class="small mt4">Lose fat slowly, preserve strength, reveal existing muscle, then build more.</p>
     </div>
+  <//>`;
+}
+
+/** The walking plan's guidance: how to weigh in and when to ease off. */
+function PlanNotesCard({ s }) {
+  const female = s.sex === 'FEMALE';
+  const notes = [
+    'Weigh yourself in the morning after using the bathroom, and compare weekly averages, not single days.',
+    female && "Don't reduce calories further when your weight fluctuates around your period.",
+    `If you feel persistently tired or dizzy${female ? ', or notice changes to your cycle' : ''}, reassess the calorie deficit with a dietitian.`,
+    'Your priority is consistency, not starving yourself.',
+  ].filter(Boolean);
+  return html`<${Card}>
+    <${CardHeader} title="Your plan's notes" icon="info" />
+    <ul class="coach-list mt8">${notes.map((n) => html`<li>${n}</li>`)}</ul>
   <//>`;
 }
 
@@ -361,21 +416,24 @@ function WeighInDialog({ entry, today, onDismiss }) {
   <//>`;
 }
 
-function MeasurementDialog({ entry, today, heightCm, onDismiss }) {
+function MeasurementDialog({ entry, today, s, onDismiss }) {
+  const female = s.sex === 'FEMALE';
   const [day, setDay] = useState(entry?.epochDay ?? today);
   const existing = entry ?? repo.measurements().find((m) => m.epochDay === day) ?? null;
   const [waist, setWaist] = useState(existing?.waistCm != null ? Fmt.num(existing.waistCm) : '');
   const [neck, setNeck] = useState(existing?.neckCm != null ? Fmt.num(existing.neckCm) : '');
+  const [hip, setHip] = useState(existing?.hipCm != null ? Fmt.num(existing.hipCm) : '');
   const [bf, setBf] = useState(existing?.bodyFatPercent != null ? Fmt.num(existing.bodyFatPercent) : '');
   const opt = (t, lo, hi) => (t.trim() === '' ? { v: null, ok: true } : (() => { const v = Fmt.parseDecimal(t); return { v, ok: v != null && v >= lo && v <= hi }; })());
   const w = opt(waist, 40, 200);
   const n = opt(neck, 20, 70);
+  const hp = opt(hip, 50, 200);
   const b = opt(bf, 3, 60);
-  const ok = w.ok && n.ok && b.ok && (w.v != null || n.v != null || b.v != null);
-  const navy = w.v != null && n.v != null ? Analytics.navyBodyFatMale(heightCm, w.v, n.v) : null;
+  const ok = w.ok && n.ok && hp.ok && b.ok && (w.v != null || n.v != null || hp.v != null || b.v != null);
+  const navy = Analytics.navyBodyFat(s, { waistCm: w.v, neckCm: n.v, hipCm: hp.v });
   const save = () => {
     if (!ok) return;
-    repo.logMeasurement({ epochDay: day, waistCm: w.v, neckCm: n.v, bodyFatPercent: b.v, note: existing?.note ?? null });
+    repo.logMeasurement({ epochDay: day, waistCm: w.v, neckCm: n.v, hipCm: hp.v, bodyFatPercent: b.v, note: existing?.note ?? null });
     onDismiss();
   };
   return html`<${Dialog} title="Body measurements" onClose=${onDismiss} actions=${html`
@@ -383,10 +441,11 @@ function MeasurementDialog({ entry, today, heightCm, onDismiss }) {
     <button class="btn text" onClick=${onDismiss}>Cancel</button>
     <button class="btn text" disabled=${!ok} onClick=${save}>Save</button>`}>
     ${entry ? html`<p><b>${Fmt.longDate(entry.epochDay)}</b></p>` : html`<${DateField} day=${day} onChange=${setDay} max=${today} />`}
-    <${Field} label="Waist (at navel)" suffix="cm" error=${w.ok ? null : 'Enter 40–200 cm'}><${NumberInput} value=${waist} onInput=${setWaist} autofocus /><//>
+    <${Field} label=${female ? 'Waist (narrowest point)' : 'Waist (at navel)'} suffix="cm" error=${w.ok ? null : 'Enter 40–200 cm'}><${NumberInput} value=${waist} onInput=${setWaist} autofocus /><//>
+    ${female && html`<${Field} label="Hip (widest point, optional)" suffix="cm" error=${hp.ok ? null : 'Enter 50–200 cm'}><${NumberInput} value=${hip} onInput=${setHip} /><//>`}
     <${Field} label="Neck (optional)" suffix="cm" error=${n.ok ? null : 'Enter 20–70 cm'}><${NumberInput} value=${neck} onInput=${setNeck} /><//>
     <${Field} label="Body fat (optional)" suffix="%" error=${b.ok ? null : 'Enter 3–60%'}
-      hint=${navy != null ? `U.S. Navy estimate (male formula): ${Fmt.num(navy)}%. Leave body fat empty to use it.` : null}>
+      hint=${navy != null ? `U.S. Navy estimate (${female ? 'female' : 'male'} formula): ${Fmt.num(navy)}%. Leave body fat empty to use it.` : null}>
       <${NumberInput} value=${bf} onInput=${setBf} /><//>
   <//>`;
 }

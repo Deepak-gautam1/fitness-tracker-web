@@ -69,6 +69,11 @@ export const exercises = [
   ex('hack_squat', 'Hack Squat', 'Quads', C),
   ex('ab_wheel_rollout', 'Ab Wheel Rollout', 'Abs', A),
   ex('plank', 'Plank', 'Abs', A, 'SECONDS'),
+  // The walking plan's short strength sessions.
+  ex('goblet_squat', 'Goblet Squat', 'Quads & glutes', C),
+  ex('push_up', 'Push-Up', 'Chest', C),
+  ex('glute_bridge', 'Glute Bridge', 'Glutes', I),
+  ex('dead_bug', 'Dead Bug', 'Abs', A),
 ];
 
 export const templates = [
@@ -154,6 +159,40 @@ const plan = {
 export const templateExercises = Object.entries(plan).flatMap(([templateId, slots]) =>
   slots.map((s, position) => ({ templateId, position, ...s })));
 
+/**
+ * The walking plan's two short strength sessions (about 30 minutes each), done on any two days a
+ * week. A starting point: change them under Settings › Workout plan.
+ */
+export const walkingTemplates = [
+  { id: 'strength_a', name: 'Strength A', hasAbs: true, dayOfWeek: 0, sortOrder: 1 },
+  { id: 'strength_b', name: 'Strength B', hasAbs: true, dayOfWeek: 0, sortOrder: 2 },
+];
+
+const walkingPlan = {
+  strength_a: [
+    slot('goblet_squat', 3, 10, 15, 90, 'Hold one dumbbell at your chest'),
+    slot('push_up', 3, 6, 12, 90, 'Hands on a bench or knees down to start'),
+    slot('pullup_lat_pulldown', 3, 10, 12, 90),
+    slot('romanian_deadlift', 3, 10, 12, 90, 'Dumbbells are fine; flat back, hinge at the hips'),
+    slot('plank', 2, 20, 40, 60),
+  ],
+  strength_b: [
+    slot('leg_press', 3, 10, 15, 90),
+    slot('db_shoulder_press', 3, 8, 12, 90),
+    slot('seated_cable_row', 3, 10, 12, 90),
+    slot('glute_bridge', 3, 12, 15, 60, 'Squeeze at the top for a second'),
+    slot('dead_bug', 2, 8, 12, 60, 'Reps per side, lower back flat'),
+  ],
+};
+
+export const walkingTemplateExercises = Object.entries(walkingPlan).flatMap(([templateId, slots]) =>
+  slots.map((s, position) => ({ templateId, position, ...s })));
+
+/** The built-in workouts for a plan type. */
+export const builtInPlan = (planType) => (planType === 'WALKING'
+  ? { templates: walkingTemplates, templateExercises: walkingTemplateExercises }
+  : { templates, templateExercises });
+
 /** Macros per single piece (egg, roti, scoop...). */
 const piece = (name, unit, kcal, protein, carbs, fat, fiber, category) =>
   ({ name, unit, baseAmount: 1, defaultAmount: 1, kcal, protein, carbs, fat, fiber, category, isCustom: false, useCount: 0, lastUsedAt: 0 });
@@ -202,6 +241,13 @@ export const foodPresets = [
   piece('Chia / flax seeds', 'tbsp', 55, 2, 4, 3.5, 3.5, EXTRAS),
   piece('Ghee / oil', 'tsp', 45, 0, 0, 5, 0, EXTRAS),
   piece('Sugar', 'tsp', 16, 0, 4, 0, 0, EXTRAS),
+  // Foods for the walking plan's meals.
+  per100('Milk (toned)', 'ml', 200, 58, 3.1, 4.7, 3.0, 0, DAIRY),
+  per100('Mutton, lean (cooked)', 'g', 120, 143, 27, 0, 3.0, 0, PROTEIN),
+  per100('Roasted chana', 'g', 20, 370, 21, 58, 5.5, 17, PROTEIN),
+  piece('Apple (small)', 'small', 77, 0.4, 20.6, 0.3, 3.6, FRUIT_VEG),
+  piece('Guava', 'medium', 68, 2.6, 14.3, 1.0, 5.4, FRUIT_VEG),
+  piece('Cucumber salad', 'bowl', 25, 1, 5, 0.2, 1, FRUIT_VEG),
 ];
 
 /** One-tap meals from the README diet plan; items reference preset names. A full day lands near 2,110 kcal and 165 g protein. */
@@ -214,4 +260,15 @@ export const mealTemplates = [
   { name: 'Whey & milk', meal: 'POST_WORKOUT', items: [['Whey protein', 1], ['Milk (low fat)', 250]] },
   { name: 'Chicken, 2 roti, veg & curd', meal: 'DINNER', items: [['Chicken breast (cooked)', 120], ['Roti (plain)', 2], ['Vegetable sabzi', 1], ['Curd / dahi', 100]] },
   { name: 'Soy chunks, 2 roti, veg & curd', meal: 'DINNER', items: [['Soy chunks (dry)', 50], ['Roti (plain)', 2], ['Vegetable sabzi', 1], ['Curd / dahi', 100]] },
+  // The walking plan: three meals (about 400, 500 and 450–500 kcal) plus fruit and chana for protein and fibre.
+  { plan: 'WALKING', name: 'Eggs, toast, milk & apple', meal: 'BREAKFAST', items: [['Whole egg', 2], ['Brown bread', 2], ['Milk (toned)', 200], ['Apple (small)', 1]] },
+  { plan: 'WALKING', name: 'Chicken, 2 roti, veg, curd & salad', meal: 'LUNCH', items: [['Chicken breast (cooked)', 120], ['Roti (plain)', 2], ['Vegetable sabzi', 1], ['Curd / dahi', 100], ['Cucumber salad', 1]] },
+  { plan: 'WALKING', name: 'Eggs, 2 roti, dal & veg', meal: 'LUNCH', items: [['Whole egg', 2], ['Roti (plain)', 2], ['Dal', 1], ['Vegetable sabzi', 1]] },
+  { plan: 'WALKING', name: 'Fish, rice, dal & veg', meal: 'DINNER', items: [['Fish (cooked)', 120], ['Rice (cooked)', 120], ['Dal', 0.5], ['Vegetable sabzi', 1]] },
+  { plan: 'WALKING', name: 'Lean mutton, rice, dal & veg', meal: 'DINNER', items: [['Mutton, lean (cooked)', 120], ['Rice (cooked)', 120], ['Dal', 0.5], ['Vegetable sabzi', 1]] },
+  { plan: 'WALKING', name: 'Chicken, rice, dal & veg', meal: 'DINNER', items: [['Chicken breast (cooked)', 120], ['Rice (cooked)', 120], ['Dal', 0.5], ['Vegetable sabzi', 1]] },
+  { plan: 'WALKING', name: 'Guava & roasted chana', meal: 'SNACK', items: [['Guava', 1], ['Roasted chana', 20]] },
 ];
+
+/** The walking plan's lunch/dinner protein for each weekday, Monday first. */
+export const proteinRotation = ['Chicken', 'Fish', 'Chicken', 'Eggs + dal', 'Lean mutton', 'Fish', 'Chicken'];

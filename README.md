@@ -1,6 +1,6 @@
 # Fitness Tracker (web, for iPhone)
 
-The Android Fitness Tracker app rebuilt as a web app, so it runs on an iPhone without the App Store. It has the same plan, rules and screens: Today, Workout, Food, Progress and Photos, plus Settings, the workout plan editor and My foods.
+The Android Fitness Tracker app rebuilt as a web app, so it runs on an iPhone without the App Store. It has the same rules and screens: Today, Workout, Food, Progress and Photos, plus Settings, the workout plan editor and My foods. It can follow the Android app's gym plan or a walking-based plan (see "Pick a plan").
 
 Everything is stored on the phone. There's no account and no server. The app only goes online for the optional ChatGPT features, which use your own OpenAI API key.
 
@@ -13,6 +13,21 @@ Everything is stored on the phone. There's no account and no server. The app onl
 Use the Home Screen icon every time. The Home Screen app keeps its own data, separate from Safari, so anything logged in a Safari tab doesn't show up in it.
 
 Android phones can use the same link: open it in Chrome and choose *Install app*.
+
+## Pick a plan
+
+The first time the app opens, it asks which plan to follow, plus your sex, height, current weight and target weight. Those numbers stay on the phone. Everything else can be changed later in *Settings*, including switching plans (*Settings › Plan*).
+
+| | Gym: 6-day push/pull/legs | Walking & 3 meals |
+| --- | --- | --- |
+| Starting targets | 2,100 kcal · 150 g protein · 230 g carbs · 65 g fat | 1,450 kcal (floor 1,400) · 100 g protein · 150 g carbs · 45 g fat · 25–30 g fibre |
+| Steps | 8,000–10,000 a day | 5,000 a day in week 1, then 6,000, 7,000, and 8,000–10,000 from week 4 |
+| Training | Push A to Legs B, Monday to Saturday; Sunday rest; days off pause the order | Two optional short strength sessions a week (Strength A and B), on any days |
+| Food | Six meal slots and the README's plan meals | Breakfast, lunch, dinner and snacks; the plan's three meals as one-tap ideas; a weekly protein rotation (chicken, fish, chicken, eggs + dal, lean mutton, fish, chicken) |
+| Today | Today's workout, then the week's workouts | Today's walk against this week's step goal, the week's step days, strength sessions |
+| After the goal | Phase 2: lean muscle building | Maintenance: hold the new weight |
+
+Choosing *Female* uses the U.S. Navy body-fat formula for women (waist, hip and neck), and adds a note not to cut calories when weight rises around a period. The walking plan's strength sessions are a suggested starting point; change them under *Settings › Workout plan*.
 
 ## Moving data between phones
 
@@ -30,6 +45,7 @@ A web app on iPhone can't do everything an installed Android app can:
 
 | Android app | Web app |
 | --- | --- |
+| One plan: the six-day gym cut | The gym plan or the walking & 3 meals plan, chosen on first run |
 | Morning, evening and Sunday reminder notifications | No reminders. The Sunday check-in appears as a card on Today every Sunday instead |
 | Rest timer buzzes on the lock screen and in other apps | The timer beeps only while the app is on screen, and only with the ringer switch on. It asks the phone to keep the screen awake while you rest |
 | Home-screen widget | None |
@@ -65,10 +81,11 @@ css/app.css        the Android app's colours (light and dark) and layout
 js/domain.js       plan logic, ported line by line from the Android domain package:
                    7-day averages, weekly-rate rules, progressive overload, the
                    workout order and days off, checklist, Sunday check-in
-js/seed.js         the built-in workout plan, foods and plan meals (SeedData.kt)
+js/seed.js         the built-in workouts for both plans, foods, plan meals and the
+                   walking plan's protein rotation (SeedData.kt)
 js/db.js           IndexedDB storage on the phone, kept in memory while the app runs
 js/repo.js         every read and write the screens use (FitnessRepository.kt)
 js/ai.js           ChatGPT: OpenAI client, prompts, day report, encrypted key
 js/backup.js       JSON backup/restore (Android format), CSV, photo ZIPs
-js/ui/*.js         the screens and shared components
+js/ui/*.js         the screens and shared components (setup.js is the first-run plan choice)
 ```

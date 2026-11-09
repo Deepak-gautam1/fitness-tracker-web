@@ -101,6 +101,12 @@ export const Fmt = {
     return Number.isFinite(v) ? v : null;
   },
   plural: (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`,
+  /** "66–67 kg", or "60 kg" when both ends are the same. */
+  range(min, max, unit = 'kg', decimals = 1) {
+    const a = Fmt.num(min, decimals);
+    const b = Fmt.num(max, decimals);
+    return `${a === b ? a : `${a}–${b}`}${unit ? ` ${unit}` : ''}`;
+  },
 };
 
 /** 50 → "50", 52.5 → "52.5", 52.25 → "52.25". */
@@ -199,7 +205,58 @@ export function defaultSettings(programStartEpochDay = todayDay()) {
     photoIntervalDays: 21,
     definitionImproved: false,
     absMoreDefined: false,
+    // Web additions; the Android app ignores them in a backup.
+    /** GYM: the six-day push/pull/legs cut. WALKING: daily steps, 3 meals, optional strength sessions. */
+    planType: 'GYM',
+    /** MALE or FEMALE: picks the body-fat formula and a few notes. */
+    sex: 'MALE',
+    /** The first week's step minimum; it rises by [stepsWeeklyIncrease] a week until it reaches dailyStepsMin. */
+    stepsStart: 8000,
+    stepsWeeklyIncrease: 1000,
+    /** Walking plan: optional short strength sessions a week. */
+    strengthSessionsPerWeek: 2,
+    checklistCreatine: true,
   };
+}
+
+/** The two plans the app can follow. Numbers are each plan's starting targets; all are editable in Settings. */
+export const PLANS = {
+  GYM: {
+    label: 'Gym: 6-day push/pull/legs',
+    short: 'Gym plan',
+    description: 'A cut with a six-day push/pull/legs gym plan, 2,100 kcal and 150 g protein to start, 8,000–10,000 steps. Sunday is rest.',
+    preset: {
+      dailyCalories: 2100, proteinGrams: 150, carbsGrams: 230, fatGrams: 65, fiberGramsMin: 25, fiberGramsMax: 35,
+      waterLitersMin: 2.5, waterLitersMax: 3.5, dailyStepsMin: 8000, dailyStepsTarget: 10000, stepsStart: 8000,
+      stepsWeeklyIncrease: 1000, targetWeightLossMinKgPerWeek: 0.3, targetWeightLossMaxKgPerWeek: 0.5,
+      cardioSessionsMin: 2, cardioSessionsMax: 3, sleepHoursMin: 7, calorieFloor: 1800,
+      phase2GainMinKgPerWeek: 0.1, phase2GainMaxKgPerWeek: 0.25, photoIntervalDays: 21, strengthSessionsPerWeek: 2,
+      checklistCreatine: true,
+    },
+  },
+  WALKING: {
+    label: 'Walking & 3 meals',
+    short: 'Walking plan',
+    description: 'Gradual fat loss with daily walking that builds from 5,000 to 8,000–10,000 steps, three Indian meals a day, ' +
+      '1,450 kcal and 100 g protein, and two optional short strength sessions a week.',
+    preset: {
+      dailyCalories: 1450, proteinGrams: 100, carbsGrams: 150, fatGrams: 45, fiberGramsMin: 25, fiberGramsMax: 30,
+      waterLitersMin: 2.0, waterLitersMax: 3.0, dailyStepsMin: 8000, dailyStepsTarget: 10000, stepsStart: 5000,
+      stepsWeeklyIncrease: 1000, targetWeightLossMinKgPerWeek: 0.3, targetWeightLossMaxKgPerWeek: 0.5,
+      cardioSessionsMin: 0, cardioSessionsMax: 0, sleepHoursMin: 7, calorieFloor: 1400,
+      phase2GainMinKgPerWeek: 0, phase2GainMaxKgPerWeek: 0.1, photoIntervalDays: 21, strengthSessionsPerWeek: 2,
+      checklistCreatine: false,
+    },
+  },
+};
+
+export const isWalking = (s) => s?.planType === 'WALKING';
+
+/** The day's step minimum: it builds week by week from stepsStart up to dailyStepsMin. */
+export function stepsGoalFor(s, day) {
+  if (!(s.stepsWeeklyIncrease > 0) || !(s.stepsStart < s.dailyStepsMin)) return s.dailyStepsMin;
+  const week = Math.max(0, Math.floor((day - s.programStartEpochDay) / 7));
+  return Math.min(s.dailyStepsMin, s.stepsStart + week * s.stepsWeeklyIncrease);
 }
 
 export const emptyLog = (epochDay) => ({
@@ -305,7 +362,14 @@ export const Analytics = {
     const changes = Analytics.weeklyChanges(weights, today);
     const last = changes.length ? changes[changes.length - 1] : null;
     const prev = changes.length >= 2 ? changes[changes.length - 2] : null;
-    return s.phase === 1 ? assessCut(s, Analytics.currentAverage(weights), last, prev) : assessBuild(s, last, prev);
+    let r;
+    if (s.phase === 1) r = assessCut(s, Analytics.currentAverage(weights), last, prev);
+    else r = isWalking(s) ? assessMaintain(s, last, prev) : assessBuild(s, last, prev);
+    // Water retention around a period can hide a week's loss; the plan says not to cut calories for it.
+    if (s.sex === 'FEMALE' && s.phase === 1 && (r.status === RateStatus.SLOW || r.status === RateStatus.PLATEAU)) {
+      r = { ...r, advice: `${r.advice} Weight can rise for a few days around your period: don't cut calories for that, judge it on the weekly average.` };
+    }
+    return r;
   },
 
   cutProgress(s, weights, today) {
@@ -429,6 +493,21 @@ export const Analytics = {
     return bf >= 3 && bf <= 60 ? bf : null;
   },
 
+  /** U.S. Navy circumference method, female formula (cm): needs the hip as well. */
+  navyBodyFatFemale(heightCm, waistCm, neckCm, hipCm) {
+    if (hipCm == null || waistCm + hipCm <= neckCm || heightCm <= 0) return null;
+    const bf = 495.0 / (1.29579 - 0.35004 * Math.log10(waistCm + hipCm - neckCm) + 0.221 * Math.log10(heightCm)) - 450.0;
+    return bf >= 8 && bf <= 60 ? bf : null;
+  },
+
+  /** The Navy estimate for the person's sex, or null without the measurements it needs. */
+  navyBodyFat(s, m) {
+    if (m?.waistCm == null || m.neckCm == null) return null;
+    return s.sex === 'FEMALE'
+      ? Analytics.navyBodyFatFemale(s.heightCm, m.waistCm, m.neckCm, m.hipCm)
+      : Analytics.navyBodyFatMale(s.heightCm, m.waistCm, m.neckCm);
+  },
+
   /** Best score in the first two vs the last two sessions of each lift (needs four sessions). */
   liftChanges(sets, measureOf) {
     const byExercise = new Map();
@@ -504,6 +583,33 @@ function assessCut(s, current, last, prev) {
   return {
     status: RateStatus.FAST, weeklyChangeKg: last, headline: `Faster than plan: ${rate}`,
     advice: `Target is ${range}. Fine for now; if it stays above 0.7 kg/week, add 100–150 kcal/day.`,
+  };
+}
+
+/** Walking plan, Phase 2: hold the new weight within about ±0.15 kg a week. */
+function assessMaintain(s, last, prev) {
+  if (last == null) {
+    return {
+      status: RateStatus.NOT_ENOUGH_DATA, weeklyChangeKg: null, headline: 'Building your trend',
+      advice: 'Weigh in every morning. Aim to hold your weight steady, judged on weekly averages.',
+    };
+  }
+  const rate = `${Fmt.signedKg(last)}/week`;
+  if (prev != null && last > 0.15 && prev > 0.15) {
+    return {
+      status: RateStatus.TOO_FAST, weeklyChangeKg: last, headline: `Creeping up: ${rate}`,
+      advice: 'Two weeks of gain. Trim ~100 kcal/day or add 1,000–2,000 steps a day.',
+    };
+  }
+  if (prev != null && last < -0.15 && prev < -0.15) {
+    return {
+      status: RateStatus.PLATEAU, weeklyChangeKg: last, headline: `Still losing: ${rate}`,
+      advice: `Two weeks of loss. Add ~100–150 kcal/day (to ${Fmt.int(s.dailyCalories + 100)}–${Fmt.kcal(s.dailyCalories + 150)}) to hold your weight.`,
+    };
+  }
+  return {
+    status: RateStatus.ON_TRACK, weeklyChangeKg: last, headline: `Holding steady: ${rate}`,
+    advice: `Keep calories around ${Fmt.kcal(s.dailyCalories)}, keep walking and keep protein at ${s.proteinGrams} g.`,
   };
 }
 
@@ -622,12 +728,16 @@ export const Meters = {
 
 // ------------------------------------------------------------------ the daily checklist
 
-/** The day's workout as the checklist sees it: { name, doneSets, plannedSets, done } or null on a rest day. */
-export function buildChecklist(s, workout, log, t, weightKg) {
+/**
+ * The day's checklist. [workout] is { name, doneSets, plannedSets, done }, or null on a rest day; the
+ * walking plan has no daily workout item. [stepsGoal] is the day's step minimum (it builds up week by week).
+ */
+export function buildChecklist(s, workout, log, t, weightKg, stepsGoal = s.dailyStepsMin) {
+  const workoutItem = workout == null
+    ? { key: 'WORKOUT', label: 'Rest day', detail: 'Recovery is part of the plan', done: true, manual: false }
+    : { key: 'WORKOUT', label: `Workout: ${workout.name}`, detail: `${workout.doneSets} / ${workout.plannedSets} sets`, done: workout.done, manual: false };
   return [
-    workout == null
-      ? { key: 'WORKOUT', label: 'Rest day', detail: 'Recovery is part of the plan', done: true, manual: false }
-      : { key: 'WORKOUT', label: `Workout: ${workout.name}`, detail: `${workout.doneSets} / ${workout.plannedSets} sets`, done: workout.done, manual: false },
+    ...(isWalking(s) ? [] : [workoutItem]),
     {
       key: 'WEIGH_IN', label: 'Morning weigh-in', detail: weightKg != null ? Fmt.kg(weightKg) : 'After waking and the bathroom, before food',
       done: weightKg != null, manual: false,
@@ -645,16 +755,29 @@ export function buildChecklist(s, workout, log, t, weightKg) {
       done: log.waterMl >= s.waterLitersMin * 1000, manual: false,
     },
     {
-      key: 'STEPS', label: `Steps ${Fmt.int(s.dailyStepsMin)}+`, detail: log.steps != null ? `${Fmt.int(log.steps)} steps` : 'Not logged yet',
-      done: (log.steps ?? 0) >= s.dailyStepsMin, manual: false,
+      key: 'STEPS', label: `Steps ${Fmt.int(stepsGoal)}+`, detail: log.steps != null ? `${Fmt.int(log.steps)} steps` : 'Not logged yet',
+      done: (log.steps ?? 0) >= stepsGoal, manual: false,
     },
     {
       key: 'SLEEP', label: `Sleep ${Fmt.num(s.sleepHoursMin)} h+`, detail: log.sleepHours != null ? `${Fmt.num(log.sleepHours)} h last night` : 'Not logged yet',
       done: (log.sleepHours ?? 0) >= s.sleepHoursMin, manual: false,
     },
-    { key: 'CREATINE', label: 'Creatine', detail: log.creatine ? 'Taken' : 'Tap to mark', done: log.creatine, manual: true },
+    ...(s.checklistCreatine === false ? [] : [
+      { key: 'CREATINE', label: 'Creatine', detail: log.creatine ? 'Taken' : 'Tap to mark', done: log.creatine, manual: true },
+    ]),
     { key: 'NO_JUNK', label: 'No junk food or sugar', detail: log.noJunk ? 'Clean day' : 'Tap to mark', done: log.noJunk, manual: true },
   ];
+}
+
+/** A day against the walking plan's step goal, for the week strip and consistency grid. */
+export function stepsStatus(s, day, today, steps) {
+  const goal = stepsGoalFor(s, day);
+  if (steps != null && steps >= goal) return DayStatus.DONE;
+  if (steps != null && steps > 0) return DayStatus.PARTIAL;
+  if (day > today) return DayStatus.FUTURE;
+  if (day === today) return DayStatus.TODAY;
+  if (day < s.programStartEpochDay) return DayStatus.BEFORE_START;
+  return DayStatus.MISSED;
 }
 
 // ------------------------------------------------------------------ the Sunday check-in
@@ -672,7 +795,12 @@ export function weeklyCheckIn(s, weights, today, week, planStartEpochDay) {
   if (average == null) lines.push('No weigh-ins this week. Weigh in every morning.');
   else if (change == null) lines.push(`7-day average ${Fmt.kg(average)}`);
   else lines.push(`7-day average ${Fmt.kg(average)} (${Fmt.signedKg(change)} on last week)`);
-  if (week.workoutsPlanned > 0) lines.push(`Workouts: ${week.workoutsDone} of ${week.workoutsPlanned} done`);
+  if (isWalking(s)) {
+    if (week.days > 0) lines.push(`Step goal hit on ${week.stepDays} of ${week.days} days`);
+    if (week.workoutsPlanned > 0) lines.push(`Strength sessions: ${week.workoutsDone} of ${week.workoutsPlanned}`);
+  } else if (week.workoutsPlanned > 0) {
+    lines.push(`Workouts: ${week.workoutsDone} of ${week.workoutsPlanned} done`);
+  }
   if (week.days > 0) {
     lines.push(week.foodDays === 0 ? 'No food logged this week' : `Protein target hit on ${week.proteinDays} of ${week.days} days`);
   }
@@ -690,7 +818,8 @@ export function weeklyCheckIn(s, weights, today, week, planStartEpochDay) {
   }
   const summary = [
     average != null ? Fmt.kg(average) + (change != null ? ` (${Fmt.signed(change)})` : '') : null,
-    week.workoutsPlanned > 0 ? `${week.workoutsDone}/${week.workoutsPlanned} workouts` : null,
+    isWalking(s) && week.days > 0 ? `steps ${week.stepDays}/${week.days} days` : null,
+    week.workoutsPlanned > 0 ? `${week.workoutsDone}/${week.workoutsPlanned} ${isWalking(s) ? 'strength' : 'workouts'}` : null,
     week.foodDays > 0 ? `protein ${week.proteinDays}/${week.days} days` : null,
   ].filter(Boolean).join(' · ') || 'Your week in numbers';
   return { title: `Week ${weekNumber} check-in`, summary, lines };

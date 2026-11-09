@@ -13,6 +13,7 @@ import { FoodScreen, FoodLibraryScreen } from './ui/food.js';
 import { ProgressScreen } from './ui/progress.js';
 import { PhotosScreen, CompareScreen } from './ui/photos.js';
 import { SettingsScreen, PlanScreen, PlanTemplateScreen } from './ui/settings.js';
+import { SetupScreen } from './ui/setup.js';
 
 const TABS = [
   ['today', 'Today', 'calendar'],
@@ -48,6 +49,10 @@ function App() {
     return () => offs.forEach((off) => off());
   }, []);
   const refresh = () => force((x) => x + 1);
+
+  if (!repo.setupDone()) {
+    return html`<${SetupScreen} onDone=${() => { openTab('today'); refresh(); }} /><${Snackbar} noNav />`;
+  }
 
   const top = app.stack[app.stack.length - 1];
   let screen;

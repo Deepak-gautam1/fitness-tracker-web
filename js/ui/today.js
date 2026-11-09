@@ -5,7 +5,7 @@
 import { useState } from '../../vendor/preact-htm.js';
 import * as repo from '../repo.js';
 import {
-  Analytics, DayStatus, Fmt, Meters, buildChecklist, isSunday, weekStart, weeklyCheckIn, dayName,
+  Analytics, DayStatus, Fmt, Meters, buildChecklist, isSunday, isWalking, stepsGoalFor, stepsStatus, weekStart, weeklyCheckIn, dayName,
 } from '../domain.js';
 import { app, openTab, push, selectDay, snack } from './state.js';
 import {
@@ -21,15 +21,22 @@ export function todayState(day, today) {
   const plannedSets = repo.plannedSetsByTemplate(planItems);
   const order = repo.rotation(ws, ws + 6, today);
   const logs = repo.dailyLogMap();
-  const isRest = (d) => isSunday(d) || logs.get(d)?.restDay === true;
-  const statusFor = (d) => repo.dayStatus(d, order, plannedSets, today);
+  const walking = isWalking(settings);
+  const isRest = (d) => !walking && (isSunday(d) || logs.get(d)?.restDay === true);
+  const statusFor = (d) => (walking
+    ? stepsStatus(settings, d, today, logs.get(d)?.steps ?? null)
+    : repo.dayStatus(d, order, plannedSets, today));
+  const kSteps = (n) => `${Fmt.num(n / 1000, 1)}K`;
 
   const week = [0, 1, 2, 3, 4, 5, 6].map((i) => {
     const d = ws + i;
+    const steps = logs.get(d)?.steps;
     return {
       epochDay: d,
       dayLabel: dayName(d, true).toUpperCase(),
-      workoutLabel: order.get(d)?.workout?.name?.toUpperCase() ?? (isSunday(d) ? 'REST' : 'OFF'),
+      workoutLabel: walking
+        ? (steps != null ? kSteps(steps) : '—')
+        : order.get(d)?.workout?.name?.toUpperCase() ?? (isSunday(d) ? 'REST' : 'OFF'),
       status: statusFor(d),
       selected: d === day,
       isToday: d === today,
@@ -38,7 +45,7 @@ export function todayState(day, today) {
 
   const log = repo.dailyLog(day);
   const restDay = repo.session(day) == null && isRest(day);
-  const template = order.get(day)?.workout ?? null;
+  const template = walking ? null : order.get(day)?.workout ?? null;
   let workout = null;
   if (!restDay && template) {
     const items = planItems.filter((p) => p.templateId === template.id);
@@ -59,8 +66,13 @@ export function todayState(day, today) {
   let lastWeight = null;
   for (const w of weights) if (w.epochDay <= day) lastWeight = w.weightKg;
 
+  const stepsGoal = stepsGoalFor(settings, day);
   return {
-    day, today, isToday: day === today, settings,
+    day, today, isToday: day === today, settings, walking, stepsGoal,
+    strengthThisWeek: walking ? repo.workoutDays(ws, ws + 6) : 0,
+    strengthToday: walking && repo.workoutDone(day),
+    protein: repo.proteinFor(day),
+    stepDaysThisWeek: walking ? week.filter((d) => d.status === DayStatus.DONE).length : 0,
     programWeek: Math.floor(Math.max(0, day - settings.programStartEpochDay) / 7) + 1,
     restDay,
     restReason: !restDay ? null : isSunday(day)
@@ -77,7 +89,7 @@ export function todayState(day, today) {
     checklist: buildChecklist(
       settings,
       workout && { name: workout.name, doneSets: workout.doneSets, plannedSets: workout.plannedSets, done: workout.status === DayStatus.DONE },
-      log, totals, weightToday,
+      log, totals, weightToday, stepsGoal,
     ),
     photoDueInDays: lastPhoto == null ? null : lastPhoto + settings.photoIntervalDays - today,
     order, plannedSets,
@@ -96,12 +108,16 @@ function checkInFor(s, today, order, plannedSets) {
   const totals = new Map(repo.dailyTotals(ws, ws + 6).map((t) => [t.epochDay, t]));
   const photos = repo.photos();
   const lastPhoto = photos.length ? Math.max(...photos.map((p) => p.epochDay)) : null;
+  const walking = isWalking(s);
+  const allDays = [];
+  for (let d = from; d <= today; d++) allDays.push(d);
   const week = {
-    workoutsDone: statuses.filter((x) => x === DayStatus.DONE).length,
-    workoutsPlanned: statuses.filter((x) => x !== DayStatus.REST && x !== DayStatus.BEFORE_START).length,
+    workoutsDone: walking ? repo.workoutDays(ws, today) : statuses.filter((x) => x === DayStatus.DONE).length,
+    workoutsPlanned: walking ? s.strengthSessionsPerWeek : statuses.filter((x) => x !== DayStatus.REST && x !== DayStatus.BEFORE_START).length,
+    stepDays: allDays.filter((d) => (repo.dailyLog(d).steps ?? 0) >= stepsGoalFor(s, d)).length,
     proteinDays: days.filter((d) => (totals.get(d)?.protein ?? 0) >= s.proteinGrams).length,
     foodDays: days.filter((d) => totals.has(d)).length,
-    days: days.length,
+    days: walking ? allDays.length : days.length,
     waistLogged: repo.measurements().some((m) => m.epochDay >= ws && m.epochDay <= today && m.waistCm != null),
     photosDue: lastPhoto == null || lastPhoto + s.photoIntervalDays <= today,
   };
@@ -140,15 +156,21 @@ export function TodayScreen() {
     <main class="content">
       <div>
         <${DateSelector} day=${day} onChange=${selectDay} />
-        <p class="subtitle">${settings.phase === 1 ? `Phase 1 · Cut · Week ${s.programWeek}` : 'Phase 2 · Lean muscle building'}</p>
+        <p class="subtitle">${s.walking
+          ? (settings.phase === 1 ? `Fat loss · Week ${s.programWeek}` : 'Maintenance')
+          : (settings.phase === 1 ? `Phase 1 · Cut · Week ${s.programWeek}` : 'Phase 2 · Lean muscle building')}</p>
       </div>
 
-      ${s.workout == null
-        ? html`<${RestCard} s=${s} />`
-        : html`<${WorkoutCard} w=${s.workout} isToday=${s.isToday} onRest=${() => repo.updateDaily(day, (l) => ({ ...l, restDay: true }))} />`}
+      ${s.walking
+        ? html`<${WalkCard} s=${s} onSteps=${() => setDialog('steps')} />`
+        : s.workout == null
+          ? html`<${RestCard} s=${s} />`
+          : html`<${WorkoutCard} w=${s.workout} isToday=${s.isToday} onRest=${() => repo.updateDaily(day, (l) => ({ ...l, restDay: true }))} />`}
 
       <${Card}>
-        <${CardHeader} title="This week" subtitle=${`${s.weekDone} of ${s.weekPlanned} workouts done · Sunday is rest`} />
+        <${CardHeader} title="This week" subtitle=${s.walking
+          ? `${s.stepDaysThisWeek} ${s.stepDaysThisWeek === 1 ? 'day' : 'days'} at your step goal · tap a day to see it`
+          : `${s.weekDone} of ${s.weekPlanned} workouts done · Sunday is rest`} />
         <div class="mt10"><${WeekStrip} days=${s.week} onSelect=${selectDay} /></div>
       <//>
 
@@ -163,10 +185,12 @@ export function TodayScreen() {
 
       <${NutritionCard} s=${s} />
 
-      <div class="split">
-        <${WaterCard} s=${s} onAdd=${addWater} />
-        <${StepsCard} s=${s} onEdit=${() => setDialog('steps')} />
-      </div>
+      ${s.walking
+        ? html`<${WaterCard} s=${s} onAdd=${addWater} />`
+        : html`<div class="split">
+            <${WaterCard} s=${s} onAdd=${addWater} />
+            <${StepsCard} s=${s} onEdit=${() => setDialog('steps')} />
+          </div>`}
 
       <${WeighInCard} s=${s} onLog=${() => setDialog('weight')} />
 
@@ -191,7 +215,7 @@ export function TodayScreen() {
       extra=${s.weightToday != null && html`<button class="btn danger" onClick=${() => { repo.deleteWeight(day); setDialog(null); }}>Delete</button>`} />`}
     ${dialog === 'steps' && html`<${NumberDialog} title="Steps" label="Steps today" decimal=${false}
       initial=${s.log.steps != null ? String(s.log.steps) : ''}
-      message=${`Target ${Fmt.int(settings.dailyStepsMin)}–${Fmt.int(settings.dailyStepsTarget)} a day. Copy the number from the Health app or your watch.`}
+      message=${`${s.stepsGoal < settings.dailyStepsMin ? `This week's goal: ${Fmt.int(s.stepsGoal)} a day, building to ${Fmt.int(settings.dailyStepsMin)}–${Fmt.int(settings.dailyStepsTarget)}.` : `Target ${Fmt.int(settings.dailyStepsMin)}–${Fmt.int(settings.dailyStepsTarget)} a day.`} Copy the number from the Health app or your watch.`}
       validate=${(v) => (v <= 100000 ? null : 'That looks too high')}
       onDismiss=${() => setDialog(null)}
       onConfirm=${(v) => { repo.updateDaily(day, (l) => ({ ...l, steps: Math.round(v) })); setDialog(null); }} />`}
@@ -226,6 +250,39 @@ function WorkoutCard({ w, isToday, onRest }) {
       <button class="btn" onClick=${() => openTab('workout')}>${done ? 'View workout' : w.doneSets > 0 ? 'Continue workout' : 'Start workout'}</button>
       ${w.doneSets === 0 && html`<button class="btn text" onClick=${onRest}>Take a day off</button>`}
     </div>
+  <//>`;
+}
+
+/** The walking plan's main card: the day's steps against this week's goal, and strength sessions. */
+function WalkCard({ s, onSteps }) {
+  const set = s.settings;
+  const steps = s.log.steps;
+  const goal = s.stepsGoal;
+  const hit = (steps ?? 0) >= goal;
+  const building = goal < set.dailyStepsMin;
+  return html`<${Card} onClick=${onSteps}>
+    <div class="row">
+      <div class="grow">
+        <${SectionLabel}>${s.isToday ? "Today's walk" : 'Walk'}<//>
+        <div class="row bottom mt4"><span class="big">${steps == null ? '—' : Fmt.int(steps)}</span><span class="ink2" style="padding-bottom:3px">/ ${Fmt.int(goal)} steps</span></div>
+        <div class="small">${building
+          ? `Week ${s.programWeek} goal, building to ${Fmt.int(set.dailyStepsMin)}–${Fmt.int(set.dailyStepsTarget)}`
+          : `Goal ${Fmt.int(set.dailyStepsMin)}–${Fmt.int(set.dailyStepsTarget)} a day`}</div>
+      </div>
+      <${StatusCell} status=${hit ? DayStatus.DONE : steps ? DayStatus.PARTIAL : DayStatus.TODAY} lg />
+    </div>
+    <div class="mt12"><${MeterBar} fraction=${goal ? (steps ?? 0) / goal : 0} tone=${hit ? 'GOOD' : 'PROGRESS'} /></div>
+    <${StatusLine} tone=${hit ? 'GOOD' : ''} text=${hit ? 'Step goal hit' : steps ? `${Fmt.int(goal - steps)} steps to go` : 'Brisk walking: start with 20–30 minutes, then build up'} />
+    <div class="row mt12"><button class="btn" onClick=${onSteps}>${steps == null ? 'Log steps' : 'Update steps'}</button></div>
+    ${set.strengthSessionsPerWeek > 0 && html`<div class="divider mt12"></div>
+      <div class="row mt8">
+        <span class="ink2"><${Icon} name="dumbbell" size=${20} /></span>
+        <div class="grow">
+          <div>Strength: ${s.strengthThisWeek} of ${set.strengthSessionsPerWeek} this week</div>
+          <div class="tiny">Two short sessions a week help keep muscle while you lose fat</div>
+        </div>
+        <button class="btn text tight" onClick=${() => openTab('workout')}>${s.strengthToday ? 'View' : 'Log'}</button>
+      </div>`}
   <//>`;
 }
 
@@ -279,7 +336,8 @@ function NutritionCard({ s }) {
   const t = s.totals;
   const left = set.dailyCalories - t.kcal;
   return html`<${Card} onClick=${() => openTab('food')}>
-    <${CardHeader} title="Nutrition" trailing=${html`<button class="btn text" onClick=${() => openTab('food')}>Log food</button>`} />
+    <${CardHeader} title="Nutrition" subtitle=${s.protein ? `Today's protein: ${s.protein}` : null}
+      trailing=${html`<button class="btn text" onClick=${() => openTab('food')}>Log food</button>`} />
     <div class="row bottom mt4"><span class="huge">${Fmt.int(Math.abs(left))}</span><span class="ink2" style="padding-bottom:5px">${left >= 0 ? 'kcal left' : 'kcal over'}</span></div>
     <div class="stack mt12">
       <${GoalMeter} label="Calories" value=${Fmt.int(t.kcal)} target=${`${Fmt.int(set.dailyCalories)} kcal`} spec=${Meters.budget(t.kcal, set.dailyCalories, 'kcal')} />
@@ -310,7 +368,7 @@ function StepsCard({ s, onEdit }) {
   return html`<${Card} class="tight" onClick=${onEdit}>
     <div class="row"><span class="ink2"><${Icon} name="steps" size=${18} /></span><b>Steps</b></div>
     <div class="row bottom mt6"><span class="big">${s.log.steps == null ? '—' : Fmt.int(steps)}</span><span class="tiny" style="padding-bottom:4px">/ ${Fmt.int(s.settings.dailyStepsTarget / 1000)}k</span></div>
-    <div class="mt6"><${MeterBar} fraction=${s.settings.dailyStepsTarget ? steps / s.settings.dailyStepsTarget : 0} tone=${steps >= s.settings.dailyStepsMin ? 'GOOD' : 'PROGRESS'} /></div>
+    <div class="mt6"><${MeterBar} fraction=${s.settings.dailyStepsTarget ? steps / s.settings.dailyStepsTarget : 0} tone=${steps >= s.stepsGoal ? 'GOOD' : 'PROGRESS'} /></div>
     <div class="mt10"><button class="btn outline small block" onClick=${onEdit}>${s.log.steps == null ? 'Log steps' : 'Edit'}</button></div>
   <//>`;
 }

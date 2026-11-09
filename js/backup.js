@@ -25,7 +25,8 @@ export function exportJson() {
     settings: s ? Object.fromEntries(SETTINGS_KEYS.map((k) => [k, s[k] ?? null])) : null,
     weights: all('weights').sort(by('epochDay')).map((w) => ({ epochDay: w.epochDay, weightKg: w.weightKg, note: w.note ?? null })),
     measurements: all('measurements').sort(by('epochDay')).map((m) => ({
-      epochDay: m.epochDay, waistCm: m.waistCm ?? null, neckCm: m.neckCm ?? null, bodyFatPercent: m.bodyFatPercent ?? null, note: m.note ?? null,
+      epochDay: m.epochDay, waistCm: m.waistCm ?? null, neckCm: m.neckCm ?? null, hipCm: m.hipCm ?? null,
+      bodyFatPercent: m.bodyFatPercent ?? null, note: m.note ?? null,
     })),
     dailyLogs: all('dailyLogs').sort(by('epochDay')).map((l) => ({
       epochDay: l.epochDay, waterMl: l.waterMl, steps: l.steps ?? null, sleepHours: l.sleepHours ?? null,
@@ -91,6 +92,7 @@ export function parseBackup(text) {
         const v = root.settings[k];
         if (k === 'phase2StartEpochDay') settings[k] = typeof v === 'number' ? v : null;
         else if (typeof d[k] === 'boolean') settings[k] = typeof v === 'boolean' ? v : d[k];
+        else if (typeof d[k] === 'string') settings[k] = typeof v === 'string' ? v : d[k];
         else settings[k] = typeof v === 'number' && Number.isFinite(v) ? v : d[k];
       }
     }
@@ -99,7 +101,7 @@ export function parseBackup(text) {
       weights: list(root, 'weights', (o) => ({ epochDay: need(o, 'epochDay'), weightKg: need(o, 'weightKg'), note: optStr(o, 'note') })),
       measurements: list(root, 'measurements', (o) => ({
         epochDay: need(o, 'epochDay'), waistCm: optNum(o, 'waistCm'), neckCm: optNum(o, 'neckCm'),
-        bodyFatPercent: optNum(o, 'bodyFatPercent'), note: optStr(o, 'note'),
+        hipCm: optNum(o, 'hipCm'), bodyFatPercent: optNum(o, 'bodyFatPercent'), note: optStr(o, 'note'),
       })),
       dailyLogs: list(root, 'dailyLogs', (o) => ({
         epochDay: need(o, 'epochDay'), waterMl: optNum(o, 'waterMl', 0), steps: optNum(o, 'steps'), sleepHours: optNum(o, 'sleepHours'),
@@ -168,6 +170,9 @@ export async function restore(b) {
   }
   replace('sets', b.sets);
   replace('sessions', b.sessions);
+  // A backup without workouts (or from before the walking plan) gets the built-in plan of its type.
+  if (db.tables.templates.size === 0) repo.applyBuiltInPlan();
+  db.setMeta('setupDone', true);
   await db.flush();
   const days = new Set([...b.weights, ...b.dailyLogs, ...b.food, ...b.sets].map((x) => x.epochDay)).size;
   return { weighIns: b.weights.length, foods: b.food.length, sets: b.sets.length, days };
@@ -205,13 +210,14 @@ export function exportDailyCsv() {
     .sort((a, b) => a - b);
   const sum = (list, key) => list.reduce((a, e) => a + e[key], 0);
   const lines = ['date,weight_kg,weight_7day_avg_kg,calories_kcal,protein_g,carbs_g,fat_g,fiber_g,water_l,steps,sleep_h,' +
-    'cardio_min,workout,sets_logged,waist_cm,body_fat_pct,creatine,no_junk,rest_day,note'];
+    'cardio_min,workout,sets_logged,waist_cm,hip_cm,body_fat_pct,creatine,no_junk,rest_day,note'];
   for (const day of days) {
     const t = trend.get(day);
     const log = logs.get(day);
     const f = foods.get(day) ?? [];
     const m = measurements.get(day);
-    const workout = sessions.has(day) ? templates.get(sessions.get(day).templateId)?.name : isSunday(day) ? 'Rest' : null;
+    const gymRest = isSunday(day) && repo.settings()?.planType !== 'WALKING';
+    const workout = sessions.has(day) ? templates.get(sessions.get(day).templateId)?.name : gymRest ? 'Rest' : null;
     const yn = (v) => (log ? (v ? 'yes' : 'no') : null);
     lines.push(row([
       isoDate(day),
@@ -229,6 +235,7 @@ export function exportDailyCsv() {
       workout ?? null,
       sets.has(day) ? sets.get(day).length : null,
       m?.waistCm != null ? Fmt.num(m.waistCm) : null,
+      m?.hipCm != null ? Fmt.num(m.hipCm) : null,
       m?.bodyFatPercent != null ? Fmt.num(m.bodyFatPercent) : null,
       yn(log?.creatine), yn(log?.noJunk), yn(log?.restDay),
       log?.note ?? null,

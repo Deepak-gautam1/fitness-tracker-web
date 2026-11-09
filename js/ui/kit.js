@@ -306,6 +306,16 @@ export function TextDialog({ title, label, initial = '', onSave, onDismiss }) {
 export function CardioCard({ settings, entriesToday, sessionsThisWeek, onAdd, onDelete }) {
   const s = settings;
   const toGo = Math.max(0, s.cardioSessionsMin - sessionsThisWeek);
+  if (!(s.cardioSessionsMax > 0)) {
+    return html`<${Card}>
+      <${CardHeader} title="Cardio" icon="heart" subtitle="Optional: brisk walks count in your steps; log anything else here"
+        trailing=${html`<button class="btn text" onClick=${onAdd}>Log</button>`} />
+      ${entriesToday.length > 0 && html`<div class="mt8">${entriesToday.map((e) => html`<div class="row">
+        <span class="grow">${e.type} · ${e.minutes} min</span>
+        <button class="icon-btn" aria-label=${`Remove ${e.type}`} onClick=${() => onDelete(e)}><${Icon} name="x" size=${18} /></button>
+      </div>`)}</div>`}
+    <//>`;
+  }
   return html`<${Card}>
     <${CardHeader} title="Cardio" icon="heart"
       subtitle=${`${sessionsThisWeek} of ${s.cardioSessionsMin}–${s.cardioSessionsMax} sessions this week`}

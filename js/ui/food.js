@@ -4,7 +4,7 @@
 import { useState, useEffect } from '../../vendor/preact-htm.js';
 import * as repo from '../repo.js';
 import * as ai from '../ai.js';
-import { Fmt, FoodCategories, Meal, Meters, totalsOf } from '../domain.js';
+import { Fmt, FoodCategories, Meal, Meters, dayName, isWalking, totalsOf, weekStart } from '../domain.js';
 import { app, push, selectDay, snack } from './state.js';
 import {
   html, Icon, TopBar, BackBar, Card, CardHeader, GoalMeter, MeterBar, DateSelector, Dialog, Sheet, ConfirmDialog,
@@ -15,6 +15,13 @@ const amountLabel = (quantity, unit) => (unit === 'g' || unit === 'ml' ? `${Fmt.
 const macroLine = (t) => `${Fmt.int(t.kcal)} kcal · P ${Fmt.num(t.protein)} g · C ${Fmt.num(t.carbs)} g · F ${Fmt.num(t.fat)} g`;
 const perLabel = (p) => (p.baseAmount === 1 ? `per ${p.unit}` : `per ${Fmt.num(p.baseAmount)} ${p.unit}`);
 const kcalFromMacros = (p, c, f) => p * 4 + c * 4 + f * 9;
+
+/** The plan's meal sections, plus any other section that has food logged (say, from a restored backup). */
+function visibleMeals(entries = []) {
+  const slots = new Set(repo.mealSlots());
+  for (const e of entries) slots.add(Meal.of(e.meal).name);
+  return Meal.entries.filter((m) => slots.has(m.name));
+}
 
 export function FoodScreen() {
   const day = app.day;
@@ -27,6 +34,8 @@ export function FoodScreen() {
   const [editing, setEditing] = useState(null);
   const [idea, setIdea] = useState(null);
   const left = s.dailyCalories - t.kcal;
+  const walking = isWalking(s);
+  const protein = repo.proteinFor(day);
   const liters = log.waterMl / 1000;
   const waterSpec = Meters.minimum(liters, s.waterLitersMin, `${Fmt.num(s.waterLitersMin - liters, 2)} L to go`);
   const water = (ml) => {
@@ -72,7 +81,16 @@ export function FoodScreen() {
         <div class="mt10"><button class="btn tonal" onClick=${() => { const n = repo.copyFood(day - 1, day); snack(`Copied ${Fmt.plural(n, 'item')}`); }}>Copy yesterday's food</button></div>
       <//>`}
 
-      ${Meal.entries.map((meal) => {
+      ${protein && html`<${Card}>
+        <${CardHeader} title=${`Today's protein: ${protein}`} icon="food" subtitle="Your weekly lunch and dinner rotation" />
+        <div class="stack s6 mt10">${repo.proteinRotation().map((p, i) => {
+          const d = weekStart(day) + i;
+          return html`<div class="row"><span class=${`grow ${d === day ? '' : 'ink2'}`} style=${d === day ? 'font-weight:600' : ''}>${dayName(d)}</span><span class=${d === day ? '' : 'ink2'} style=${d === day ? 'font-weight:600' : ''}>${p}</span></div>`;
+        })}</div>
+        <p class="small mt10">Keep mutton to a moderate portion and prefer lean cuts. Fried meat and creamy gravies shouldn't be everyday foods.</p>
+      <//>`}
+
+      ${visibleMeals(entries).map((meal) => {
         const items = entries.filter((e) => Meal.of(e.meal).name === meal.name);
         const mt = totalsOf(items);
         const ideas = repo.mealTemplates().filter((m) => m.meal === meal.name);
@@ -94,7 +112,14 @@ export function FoodScreen() {
 
       <${Card}>
         <${CardHeader} title="How to hit your targets" icon="info" />
-        <div class="stack s6 mt10 small">
+        ${walking ? html`<div class="stack s6 mt10 small">
+          <p>1. Hit protein (${s.proteinGrams} g): add a fruit such as guava and 20 g roasted chana, and adjust curd, chicken or fish portions to your totals.</p>
+          <p>2. Stay close to ${Fmt.kcal(s.dailyCalories)}. Count the cooking oil too.</p>
+          <p>3. Get ${s.fiberGramsMin}–${s.fiberGramsMax} g fibre from fruit, vegetables, dal and chana.</p>
+          <p>4. Three meals: breakfast around 8–9, lunch 1–2, dinner 7–8.</p>
+          <p>5. Stay hydrated.</p>
+          <p class="mt6">Chicken, fish and mutton weights are cooked edible portions. The plan meals are about 400, 500 and 450–500 kcal. Consistency matters more than perfect days: never starve yourself.</p>
+        </div>` : html`<div class="stack s6 mt10 small">
           <p>1. Hit protein (${s.proteinGrams} g).</p>
           <p>2. Stay close to ${Fmt.kcal(s.dailyCalories)}.</p>
           <p>3. Get ${s.fiberGramsMin}–${s.fiberGramsMax} g fiber and plenty of fruit and vegetables.</p>
@@ -102,7 +127,7 @@ export function FoodScreen() {
           <p>5. Stay hydrated.</p>
           <p class="mt6">Rice and roti are allowed. Portion control matters more than cutting them out, and macros don't need to be exact every day.</p>
           <p>The plan meal ideas in each section add up to about 2,100 kcal and 165 g protein for a full day.</p>
-        </div>
+        </div>`}
       <//>
     </main>
 
@@ -142,7 +167,7 @@ function EntryDialog({ entry, onDismiss }) {
     <button class="btn text" disabled=${!valid} onClick=${save}>Save</button>`}>
     <${Field} label="Amount" suffix=${entry.unit}><${NumberInput} value=${amount} onInput=${setAmount} onEnter=${save} invalid=${!valid} /><//>
     <p class="small">${macroLine({ kcal: entry.kcal * f, protein: entry.protein * f, carbs: entry.carbs * f, fat: entry.fat * f })}</p>
-    <${Chips} options=${Meal.entries.map((m) => [m.name, m.label])} value=${meal} onChange=${setMeal} />
+    <${Chips} options=${visibleMeals([entry]).map((m) => [m.name, m.label])} value=${meal} onChange=${setMeal} />
   <//>`;
 }
 
@@ -183,7 +208,7 @@ function AddFoodSheet({ day, initialMeal, onClose }) {
       </div>`;
   }
   return html`<${Sheet} title="Add food" onClose=${onClose} actions=${html`<button class="btn text" onClick=${onClose}>Done</button>`}>
-    <${Chips} options=${Meal.entries.map((m) => [m.name, m.label])} value=${meal} onChange=${setMeal} />
+    <${Chips} options=${visibleMeals([{ meal }]).map((m) => [m.name, m.label])} value=${meal} onChange=${setMeal} />
     ${body}
   <//>`;
 }

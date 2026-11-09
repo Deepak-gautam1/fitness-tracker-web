@@ -7,10 +7,10 @@ import * as repo from '../repo.js';
 import * as ai from '../ai.js';
 import * as backup from '../backup.js';
 import * as db from '../db.js';
-import { ExerciseKind, Fmt, Measure, defaultSettings, dayName, isoDate, parseIsoDate, todayDay } from '../domain.js';
+import { ExerciseKind, Fmt, Measure, PLANS, dayName, isWalking, isoDate, parseIsoDate, todayDay } from '../domain.js';
 import { push, snack } from './state.js';
 import {
-  html, Icon, BackBar, Card, Dialog, ConfirmDialog, NumberDialog, Field, NumberInput, TextInput, Tag, saveFile, pickFile,
+  html, Icon, BackBar, Card, Dialog, ConfirmDialog, NumberDialog, Field, NumberInput, TextInput, Tag, Switch, saveFile, pickFile,
 } from './kit.js';
 import { AddExerciseDialog } from './workout.js';
 import { normalizePhoto } from './photos.js';
@@ -30,8 +30,8 @@ const GROUPS = [
     N('Target weight (high end)', 'kg', true, 'targetWeightMaxKg', 30, 250, {
       check: (s, v) => (v < s.targetWeightMinKg ? `Must be at or above the low end (${Fmt.num(s.targetWeightMinKg)} kg)` : null),
     }),
-    N('Estimated body fat at start', '%', true, 'estimatedBodyFatPercent', 3, 60),
-    N('Target body fat', '%', true, 'targetBodyFatPercent', 3, 60),
+    N('Estimated body fat at start', '%', true, 'estimatedBodyFatPercent', 0, 60, { zeroIsUnset: true, help: '0 means not set.' }),
+    N('Target body fat', '%', true, 'targetBodyFatPercent', 0, 60, { zeroIsUnset: true, help: '0 means no body-fat goal.' }),
   ]],
   ['Daily nutrition', [
     N('Daily calories', 'kcal', false, 'dailyCalories', 1000, 6000, {
@@ -53,6 +53,11 @@ const GROUPS = [
     N('Steps, target', 'steps', false, 'dailyStepsTarget', 0, 60000),
     N('Cardio sessions per week (min)', '', false, 'cardioSessionsMin', 0, 14),
     N('Cardio sessions per week (max)', '', false, 'cardioSessionsMax', 0, 14),
+    N('Steps, first week', 'steps', false, 'stepsStart', 0, 50000, {
+      help: 'The step goal starts here and rises by the weekly increase until it reaches the minimum. Set it to the minimum for no build-up.',
+    }),
+    N('Steps, weekly increase', 'steps', false, 'stepsWeeklyIncrease', 0, 5000),
+    N('Strength sessions per week', '', false, 'strengthSessionsPerWeek', 0, 7, { only: 'WALKING' }),
     N('Sleep target', 'h', true, 'sleepHoursMin', 4, 12),
     N('Photo reminder every', 'days', false, 'photoIntervalDays', 7, 90),
   ]],
@@ -65,6 +70,10 @@ const GROUPS = [
 ];
 
 const numText = (v, decimal) => (decimal ? Fmt.num(v, 2) : Fmt.int(v));
+const shown = (item, s) => (item.zeroIsUnset && !s[item.key] ? 'Not set' : `${numText(s[item.key], item.decimal)}${item.suffix ? ` ${item.suffix}` : ''}`);
+const phaseLabel = (s, ph = s.phase) => (isWalking(s)
+  ? (ph === 1 ? 'Fat loss' : 'Maintenance')
+  : (ph === 1 ? 'Phase 1 · Cut' : 'Phase 2 · Lean muscle building'));
 
 function Row({ title, detail, value, onClick, icon }) {
   return html`<button class="list-row" onClick=${onClick}>
@@ -141,7 +150,9 @@ export function SettingsScreen() {
       <${InstallBanner} />
 
       <${Group} title="Program">
-        <${Row} title="Phase" value=${s.phase === 1 ? 'Phase 1 · Cut' : 'Phase 2 · Lean muscle building'} onClick=${() => setDialog({ type: 'phase' })} />
+        <${Row} title="Plan" value=${PLANS[s.planType ?? 'GYM'].short} onClick=${() => setDialog({ type: 'plan' })} />
+        <${Row} title="Phase" value=${phaseLabel(s)} onClick=${() => setDialog({ type: 'phase' })} />
+        <${Row} title="Sex" detail="For the body-fat estimate" value=${s.sex === 'FEMALE' ? 'Female' : 'Male'} onClick=${() => setDialog({ type: 'sex' })} />
         <label class="list-row" style="position:relative">
           <span class="main"><div class="title">Program start date</div></span>
           <span class="value">${Fmt.date(s.programStartEpochDay)}</span>
@@ -161,8 +172,13 @@ export function SettingsScreen() {
       <//>
 
       ${GROUPS.map(([title, items]) => html`<${Group} title=${title}>
-        ${items.map((item) => html`<${Row} title=${item.label} value=${`${numText(s[item.key], item.decimal)}${item.suffix ? ` ${item.suffix}` : ''}`} onClick=${() => setEditing(item)} />`)}
+        ${items.filter((item) => !item.only || item.only === (s.planType ?? 'GYM')).map((item) => html`<${Row} title=${item.label} value=${shown(item, s)} onClick=${() => setEditing(item)} />`)}
         ${title === 'Daily nutrition' && html`<p class="small" style="padding:6px 16px 8px">Your macros add up to ${Fmt.kcal(fromMacros)} (protein and carbs 4 kcal/g, fat 9 kcal/g).</p>`}
+        ${title === 'Activity & recovery' && html`<label class="list-row">
+          <span class="main"><div class="title">Creatine in the daily checklist</div></span>
+          <${Switch} label="Creatine in the daily checklist" checked=${s.checklistCreatine !== false}
+            onChange=${(on) => repo.saveSettings({ ...repo.settings(), checklistCreatine: on })} />
+        </label>`}
       <//>`)}
 
       <${Group} title="Workouts & food">
@@ -186,12 +202,13 @@ export function SettingsScreen() {
       <//>
 
       <${Group} title="Reset">
-        <${Row} title="Reset targets to the plan" detail="2,100 kcal · 150 g protein · 66–67 kg · 8–10k steps" onClick=${() => setDialog({ type: 'reset' })} />
+        <${Row} title="Reset targets to the plan" detail=${isWalking(s) ? '1,450 kcal · 100 g protein · 5k steps building to 8–10k' : '2,100 kcal · 150 g protein · 8–10k steps'}
+          onClick=${() => setDialog({ type: 'reset' })} />
       <//>
 
       <${Card}>
-        <p class="small">Fitness Tracker ${APP_VERSION} · built from your Fitness Transformation README.<br />
-          Lose fat slowly, preserve strength, reveal existing muscle, then build more.</p>
+        <p class="small">Fitness Tracker ${APP_VERSION} · ${PLANS[s.planType ?? 'GYM'].label}.<br />
+          ${isWalking(s) ? 'Lose fat gradually while keeping good nutrition, energy and muscle.' : 'Lose fat slowly, preserve strength, reveal existing muscle, then build more.'}</p>
         <p class="small mt8">The web version can't send reminders, show a home-screen widget or read Apple Health, and the rest timer
           beeps only while the app is on screen (with the ringer on). Steps and sleep are typed in.</p>
       <//>
@@ -204,23 +221,38 @@ export function SettingsScreen() {
       onConfirm=${(v) => { repo.saveSettings({ ...repo.settings(), [editing.key]: editing.decimal ? v : Math.round(v) }); setEditing(null); }} />`}
 
     ${dialog?.type === 'phase' && html`<${Dialog} title="Phase" onClose=${() => setDialog(null)} actions=${html`<button class="btn text" onClick=${() => setDialog(null)}>Close</button>`}>
-      ${[[1, 'Phase 1 · Cut (deficit, 0.3–0.5 kg/week)'], [2, 'Phase 2 · Lean muscle building (maintenance → small surplus)']].map(([ph, label]) => html`
+      ${(isWalking(s)
+        ? [[1, 'Fat loss (deficit, 0.3–0.5 kg/week)'], [2, 'Maintenance (hold your new weight)']]
+        : [[1, 'Phase 1 · Cut (deficit, 0.3–0.5 kg/week)'], [2, 'Phase 2 · Lean muscle building (maintenance → small surplus)']]).map(([ph, label]) => html`
         <button class=${`chip ${s.phase === ph ? 'on' : ''}`} style="text-align:left;padding:12px" onClick=${() => {
           repo.saveSettings(ph === 2 ? { ...s, phase: 2, phase2StartEpochDay: s.phase2StartEpochDay ?? todayDay() } : { ...s, phase: 1 });
           setDialog(null);
         }}>${label}</button>`)}
-      <p class="small">Switching phase doesn't change your calories; set them under Daily nutrition. The Progress tab suggests a Phase 2 target when you reach your goal weight.</p>
+      <p class="small">Switching phase doesn't change your calories; set them under Daily nutrition. The Progress tab suggests a target when you reach your goal weight.</p>
+    <//>`}
+    ${dialog?.type === 'plan' && html`<${Dialog} title="Plan" onClose=${() => setDialog(null)} actions=${html`<button class="btn text" onClick=${() => setDialog(null)}>Close</button>`}>
+      ${Object.entries(PLANS).map(([id, plan]) => html`
+        <button class=${`chip ${(s.planType ?? 'GYM') === id ? 'on' : ''}`} style="text-align:left;padding:12px" onClick=${() => {
+          if ((s.planType ?? 'GYM') === id) setDialog(null);
+          else setDialog({ type: 'switchPlan', planType: id });
+        }}><div><b>${plan.label}</b></div><div class="tiny mt4">${plan.description}</div></button>`)}
+    <//>`}
+    ${dialog?.type === 'switchPlan' && html`<${ConfirmDialog} title=${`Switch to the ${PLANS[dialog.planType].short.toLowerCase()}?`} confirm="Switch"
+      text=${`Workouts, meal ideas and the checklist change to the ${PLANS[dialog.planType].short.toLowerCase()}. Your calories and other targets stay as they are: use “Reset targets to the plan” afterwards for its numbers. Logged history is kept.`}
+      onDismiss=${() => setDialog(null)}
+      onConfirm=${() => { repo.switchPlan(dialog.planType); setDialog(null); snack(`Switched to the ${PLANS[dialog.planType].short.toLowerCase()}`); }} />`}
+    ${dialog?.type === 'sex' && html`<${Dialog} title="Sex" onClose=${() => setDialog(null)} actions=${html`<button class="btn text" onClick=${() => setDialog(null)}>Close</button>`}>
+      ${[['FEMALE', 'Female'], ['MALE', 'Male']].map(([v, label]) => html`<button class=${`chip ${s.sex === v ? 'on' : ''}`} style="text-align:left;padding:12px"
+        onClick=${() => { repo.saveSettings({ ...s, sex: v }); setDialog(null); }}>${label}</button>`)}
+      <p class="small">Picks the U.S. Navy body-fat formula (women's uses the hip too) and adds notes that apply.</p>
     <//>`}
     ${dialog?.type === 'key' && html`<${KeyDialog} onDismiss=${() => setDialog(null)} />`}
     ${dialog?.type === 'model' && html`<${ModelDialog} onDismiss=${() => setDialog(null)} />`}
     ${dialog?.type === 'reset' && html`<${ConfirmDialog} title="Reset targets?" confirm="Reset"
-      text="Calories, macros, weight targets, steps and rates go back to the README plan. Your logged data is not touched."
+      text=${`Calories, macros, water, steps, sleep and rates go back to the ${PLANS[s.planType ?? 'GYM'].short.toLowerCase()}'s numbers. Your weights, dates and logged data are not touched.`}
       onDismiss=${() => setDialog(null)}
       onConfirm=${() => {
-        repo.saveSettings({
-          ...defaultSettings(s.programStartEpochDay), phase: s.phase, phase2StartEpochDay: s.phase2StartEpochDay,
-          definitionImproved: s.definitionImproved, absMoreDefined: s.absMoreDefined,
-        });
+        repo.resetTargets();
         setDialog(null);
         snack('Targets reset to the plan');
       }} />`}
@@ -282,14 +314,15 @@ export function PlanScreen() {
   return html`
     <${BackBar} title="Workout plan" />
     <main class="content no-nav">
-      <p class="small">Workouts run in this order, normally Monday to Saturday, and Sunday is always a rest day. A day off pauses
-        the order, so nothing is skipped. Edits apply from your next session; past sessions keep their history.</p>
+      <p class="small">${isWalking(repo.settings())
+        ? 'Two short strength sessions a week, on any days you like; they alternate A and B. A suggested starting point: change exercises, sets and reps to suit you. Edits apply from your next session; past sessions keep their history.'
+        : 'Workouts run in this order, normally Monday to Saturday, and Sunday is always a rest day. A day off pauses the order, so nothing is skipped. Edits apply from your next session; past sessions keep their history.'}</p>
       <${Card} class="flush">
         ${repo.templates().map((t) => {
           const items = plan.filter((p) => p.templateId === t.id);
           return html`<button class="list-row" onClick=${() => push({ name: 'planTemplate', templateId: t.id })}>
             <span class="main"><div class="title row">${t.name}${t.hasAbs && html`<${Tag} em>+ ABS<//>`}</div>
-              <div class="detail">${dayName(3 + t.dayOfWeek)} · ${items.length} exercises · ${items.reduce((a, p) => a + p.sets, 0)} sets</div></span>
+              <div class="detail">${t.dayOfWeek >= 1 && t.dayOfWeek <= 7 ? dayName(3 + t.dayOfWeek) : 'Any day'} · ${items.length} exercises · ${items.reduce((a, p) => a + p.sets, 0)} sets</div></span>
             <span class="ink2"><${Icon} name="right" size=${18} /></span>
           </button>`;
         })}
@@ -297,7 +330,7 @@ export function PlanScreen() {
       <button class="btn outline block" onClick=${() => setConfirm(true)}>Reset to the built-in plan</button>
     </main>
     ${confirm && html`<${ConfirmDialog} title="Reset the workout plan?" confirm="Reset" danger
-      text="All six workouts go back to the built-in plan, undoing your edits. Logged workouts and their history aren't touched."
+      text="The workouts go back to the built-in plan, undoing your edits. Logged workouts and their history aren't touched."
       onDismiss=${() => setConfirm(false)} onConfirm=${() => { repo.applyBuiltInPlan(); setConfirm(false); snack('Workout plan reset to the built-in plan'); }} />`}
   `;
 }

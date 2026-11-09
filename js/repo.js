@@ -2,7 +2,10 @@
 
 import * as db from './db.js';
 import * as Seed from './seed.js';
-import { Analytics, Measure, ExerciseKind, FoodCategories, defaultSettings, emptyLog, todayDay, planRotation, totalsOf } from './domain.js';
+import {
+  Analytics, Measure, ExerciseKind, FoodCategories, PLANS, defaultSettings, emptyLog, isWalking, stepsGoalFor, todayDay,
+  planRotation, totalsOf,
+} from './domain.js';
 
 const T = db.tables;
 const values = (table) => [...T[table].values()];
@@ -49,26 +52,73 @@ export function ensureSeeded() {
   if (!T.settings.get(1)) db.put('settings', defaultSettings(todayDay()));
   if (T.presets.size === 0) {
     db.putAll('presets', Seed.foodPresets.map((p) => ({ ...p, id: db.nextId('presets') })));
+  } else if (db.getMeta('foodsVersion', 1) < FOODS_VERSION) {
+    addMissingFoods();
   }
+  if (db.getMeta('foodsVersion', 1) !== FOODS_VERSION) db.setMeta('foodsVersion', FOODS_VERSION);
   const noPlan = T.templates.size === 0;
   if (noPlan || db.getMeta('planVersion', 1) < Seed.PLAN_VERSION) applyBuiltInPlan();
 }
 
+/** Raised when built-in foods are added, so existing installs get them once. */
+const FOODS_VERSION = 2;
+
+/** Adds built-in foods that aren't in the list, by name (a restored Android backup lacks the walking plan's). */
+function addMissingFoods() {
+  const names = new Set(values('presets').map((p) => p.name));
+  const missing = Seed.foodPresets.filter((p) => !names.has(p.name));
+  if (missing.length) db.putAll('presets', missing.map((p) => ({ ...p, id: db.nextId('presets') })));
+}
+
 /**
- * Replaces the six workouts with the built-in plan. Logged sets and sessions aren't touched, and
- * exercises keep their ids where the movement is the same, so history and "last time" carry
- * over. Exercises you created stay in the catalogue.
+ * Replaces the workouts with the built-in ones for [planType]: six for the gym plan, two short
+ * strength sessions for the walking plan. Logged sets and sessions aren't touched, and exercises
+ * keep their ids where the movement is the same, so history and "last time" carry over.
+ * Exercises you created stay in the catalogue.
  */
-export function applyBuiltInPlan() {
+export function applyBuiltInPlan(planType = settings()?.planType ?? 'GYM') {
   // As on Android, built-in exercises are written over (a renamed one gets its name back);
   // history is keyed by id, so it carries over either way.
   db.putAll('exercises', Seed.exercises.map((e) => ({ ...e })));
-  db.putAll('templates', Seed.templates.map((t) => ({ ...t })));
-  const ids = new Set(Seed.templates.map((t) => t.id));
-  for (const te of values('templateExercises')) if (ids.has(te.templateId)) db.del('templateExercises', te.id);
-  db.putAll('templateExercises', Seed.templateExercises.map((te) => ({ ...te, id: db.nextId('templateExercises') })));
+  const plan = Seed.builtInPlan(planType);
+  for (const te of values('templateExercises')) db.del('templateExercises', te.id);
+  for (const t of values('templates')) db.del('templates', t.id);
+  db.putAll('templates', plan.templates.map((t) => ({ ...t })));
+  db.putAll('templateExercises', plan.templateExercises.map((te) => ({ ...te, id: db.nextId('templateExercises') })));
+  if (planType === 'WALKING') addMissingFoods();
   db.setMeta('planVersion', Seed.PLAN_VERSION);
   db.setMeta('planStarted', todayDay());
+}
+
+/** Whether the first-run setup has been done (or a backup restored). */
+export const setupDone = () => db.getMeta('setupDone', false) === true;
+
+/** First run: the chosen plan's targets plus the person's own numbers. */
+export function completeSetup({ planType, sex, heightCm, startWeightKg, targetWeightKg }) {
+  const today = todayDay();
+  saveSettings({
+    ...defaultSettings(today),
+    ...PLANS[planType].preset,
+    planType, sex, heightCm, startWeightKg,
+    targetWeightMinKg: targetWeightKg,
+    targetWeightMaxKg: targetWeightKg,
+    estimatedBodyFatPercent: 0,
+    targetBodyFatPercent: planType === 'GYM' && sex === 'MALE' ? 14 : 0,
+  });
+  applyBuiltInPlan(planType);
+  db.setMeta('setupDone', true);
+}
+
+/** Moves to the other plan's workouts, meals and checklist. Targets stay; history is kept. */
+export function switchPlan(planType) {
+  saveSettings({ ...settings(), planType });
+  applyBuiltInPlan(planType);
+}
+
+/** The current plan's starting targets; body numbers, dates and phase are kept. */
+export function resetTargets() {
+  const s = settings();
+  saveSettings({ ...s, ...PLANS[s.planType ?? 'GYM'].preset });
 }
 
 /** The day the current workout plan started, for the four-week review; null if unknown. */
@@ -191,7 +241,20 @@ export function addMealTemplate(day, template) {
   return added;
 }
 
-export const mealTemplates = () => Seed.mealTemplates;
+/** The plan's one-tap meal ideas. */
+export const mealTemplates = () => {
+  const planType = settings()?.planType ?? 'GYM';
+  return Seed.mealTemplates.filter((m) => (m.plan ?? 'GYM') === planType);
+};
+
+/** The meal sections Food shows: three meals and snacks on the walking plan. */
+export const mealSlots = () => (isWalking(settings())
+  ? ['BREAKFAST', 'LUNCH', 'DINNER', 'SNACK']
+  : ['BREAKFAST', 'LUNCH', 'PRE_WORKOUT', 'POST_WORKOUT', 'DINNER', 'SNACK']);
+
+/** The walking plan's protein for [day] (Monday first), or null on the gym plan. */
+export const proteinFor = (day) => (isWalking(settings()) ? Seed.proteinRotation[(((day + 3) % 7) + 7) % 7] : null);
+export const proteinRotation = () => Seed.proteinRotation;
 
 export function savePreset(preset) {
   db.put('presets', { ...preset, id: preset.id ?? db.nextId('presets') });
@@ -240,6 +303,27 @@ export function lastDoneBefore(day) {
   }
   return best?.templateId ?? null;
 }
+
+/** Whether a workout was done on [day]: sets logged, or the session finished. */
+export const workoutDone = (day) => setCount(day) > 0 || session(day)?.finishedAt != null;
+
+/** Days in [from, to] with a workout done (the walking plan's strength sessions). */
+export function workoutDays(from, to) {
+  let n = 0;
+  for (let d = from; d <= to; d++) if (workoutDone(d)) n++;
+  return n;
+}
+
+/** Walking plan: the session after the last one done before [day], alternating A and B. */
+export function nextStrengthTemplate(day) {
+  const list = templates();
+  if (list.length === 0) return null;
+  const last = lastDoneBefore(day);
+  const i = list.findIndex((t) => t.id === last);
+  return list[(i + 1) % list.length];
+}
+
+export const stepsGoal = (day) => stepsGoalFor(settings(), day);
 
 /** Each day's { workout, next } in [from, to] from the workout order (see planRotation). */
 export function rotation(from, to, today = todayDay()) {

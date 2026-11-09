@@ -5,7 +5,7 @@
 import * as db from './db.js';
 import * as repo from './repo.js';
 import {
-  Analytics, DayStatus, Fmt, Meal, Measure, isSunday, todayDay, weekStart, totalsOf,
+  Analytics, DayStatus, Fmt, Meal, Measure, isSunday, isWalking, stepsGoalFor, todayDay, weekStart, totalsOf,
 } from './domain.js';
 
 export const DEFAULT_MODEL = 'gpt-6-luna';
@@ -187,6 +187,19 @@ sentence under 25 words. Use the client's exercise names, kg and grams. Don't in
 logged, mention it only when it matters. Don't diagnose; if they report pain, illness or very low intake, suggest
 caution or a professional. "summary" is two or three sentences; "next_focus" is the one thing to do next.`;
 
+const FEEDBACK_INSTRUCTIONS_WALKING = `You are an experienced, evidence-based coach and nutritionist reviewing one day of a client's log.
+The client follows a gradual fat-loss plan built on daily walking (a step goal that rises week by week to 8,000 to 10,000),
+three balanced Indian meals a day in a moderate calorie deficit with high protein, and two optional short strength sessions
+a week to keep muscle. The aim is steady loss of about 0.3 to 0.5 kg a week with good energy: consistency, not starving.
+
+Give specific, practical feedback grounded in the numbers provided: food against the daily targets (protein, calories,
+fibre), steps against this week's step goal, water and sleep against their targets, and any strength work against last
+time. Say what went well and the changes that matter most for their goal; be honest but encouraging. Two to four points
+per list, each a single sentence under 25 words. Use the client's food names, kg and grams. Don't invent data: if
+something wasn't logged, mention it only when it matters. Never suggest eating below the stated calorie floor. Don't
+diagnose; if they report fatigue, dizziness, menstrual changes, pain, illness or very low intake, suggest easing off and
+speaking to a doctor or dietitian. "summary" is two or three sentences; "next_focus" is the one thing to do next.`;
+
 const str = { type: 'string' };
 const num = { type: 'number' };
 /** Strict mode: every property required, nothing else allowed. */
@@ -268,7 +281,8 @@ export async function requestFeedback(day) {
   coachChanged();
   try {
     const modelId = model();
-    const o = await structured(FEEDBACK_INSTRUCTIONS, dayReport(day), feedbackSchema, 'medium', 8000);
+    const instructions = isWalking(repo.settings()) ? FEEDBACK_INSTRUCTIONS_WALKING : FEEDBACK_INSTRUCTIONS;
+    const o = await structured(instructions, dayReport(day), feedbackSchema, 'medium', 8000);
     const feedback = {
       day, createdAt: Date.now(), model: modelId,
       summary: String(o.summary ?? '').trim(), wentWell: strings(o.went_well), improve: strings(o.improve),
@@ -302,31 +316,43 @@ const rirText = (list) => (list.every((s) => s.rir == null) ? '' : ` (RIR ${list
 /** Everything about one day that a feedback request sends. Nothing else leaves the phone. */
 export function dayReport(day) {
   const s = repo.settings();
+  const walking = isWalking(s);
   const today = todayDay();
   const ws = weekStart(day);
-  const order = repo.rotation(ws, ws + 6, today);
+  const order = walking ? new Map() : repo.rotation(ws, ws + 6, today);
   const planItems = repo.plan();
   const plannedSets = repo.plannedSetsByTemplate(planItems);
   const log = repo.dailyLog(day);
   const lines = [];
   const programWeek = Math.floor(Math.max(0, day - s.programStartEpochDay) / 7) + 1;
   lines.push(`Day: ${Fmt.fullDate(day)}, week ${programWeek} of the program.`);
-  if (s.phase === 1) {
-    lines.push(`Goal: lose fat from ${Fmt.kg(s.startWeightKg)} to ${Fmt.num(s.targetWeightMinKg)}–${Fmt.kg(s.targetWeightMaxKg)} ` +
-      `at ${Fmt.num(s.targetWeightLossMinKgPerWeek)}–${Fmt.num(s.targetWeightLossMaxKgPerWeek)} kg a week, reach about ` +
-      `${Fmt.num(s.targetBodyFatPercent)}% body fat with visible abs, and keep strength. Height ${Fmt.num(s.heightCm)} cm.`);
+  const who = `${s.sex === 'FEMALE' ? 'Female' : 'Male'}, height ${Fmt.num(s.heightCm)} cm.`;
+  if (walking) {
+    lines.push(s.phase === 1
+      ? `Goal: lose fat gradually from ${Fmt.kg(s.startWeightKg)} to ${Fmt.range(s.targetWeightMinKg, s.targetWeightMaxKg)} ` +
+        `at ${Fmt.num(s.targetWeightLossMinKgPerWeek)}–${Fmt.num(s.targetWeightLossMaxKgPerWeek)} kg a week while keeping energy and muscle. ${who}`
+      : `Goal: hold their new weight (maintenance) while keeping energy and muscle. ${who}`);
+  } else if (s.phase === 1) {
+    lines.push(`Goal: lose fat from ${Fmt.kg(s.startWeightKg)} to ${Fmt.range(s.targetWeightMinKg, s.targetWeightMaxKg)} ` +
+      `at ${Fmt.num(s.targetWeightLossMinKgPerWeek)}–${Fmt.num(s.targetWeightLossMaxKgPerWeek)} kg a week` +
+      `${s.targetBodyFatPercent > 0 ? `, reach about ${Fmt.num(s.targetBodyFatPercent)}% body fat with visible abs` : ''}, and keep strength. Height ${Fmt.num(s.heightCm)} cm.`);
   } else {
     lines.push(`Goal: lean muscle gain at ${Fmt.num(s.phase2GainMinKgPerWeek)}–${Fmt.num(s.phase2GainMaxKgPerWeek)} kg a week ` +
       `while staying lean. Height ${Fmt.num(s.heightCm)} cm.`);
   }
-  lines.push(`Daily targets: ${Fmt.kcal(s.dailyCalories)}, protein ${s.proteinGrams} g, carbs ${s.carbsGrams} g, fat ${s.fatGrams} g, ` +
+  const stepsGoal = stepsGoalFor(s, day);
+  lines.push(`Daily targets: ${Fmt.kcal(s.dailyCalories)} (never below ${Fmt.kcal(s.calorieFloor)}), protein ${s.proteinGrams} g, carbs ${s.carbsGrams} g, fat ${s.fatGrams} g, ` +
     `fiber ${s.fiberGramsMin}–${s.fiberGramsMax} g, water ${Fmt.num(s.waterLitersMin)}–${Fmt.num(s.waterLitersMax)} L, ` +
-    `steps ${Fmt.int(s.dailyStepsMin)}–${Fmt.int(s.dailyStepsTarget)}, sleep ${Fmt.num(s.sleepHoursMin)} h or more, ` +
-    `cardio ${s.cardioSessionsMin}–${s.cardioSessionsMax} sessions a week.`);
+    `steps ${stepsGoal < s.dailyStepsMin ? `${Fmt.int(stepsGoal)} this week, building to ` : ''}${Fmt.int(s.dailyStepsMin)}–${Fmt.int(s.dailyStepsTarget)}, sleep ${Fmt.num(s.sleepHoursMin)} h or more` +
+    (walking ? `, ${s.strengthSessionsPerWeek} short strength sessions a week.` : `, cardio ${s.cardioSessionsMin}–${s.cardioSessionsMax} sessions a week.`));
   lines.push('');
 
-  const template = order.get(day)?.workout ?? null;
-  if (!template) {
+  const template = walking
+    ? (repo.workoutDone(day) ? repo.templates().find((t) => t.id === repo.session(day)?.templateId) ?? null : null)
+    : order.get(day)?.workout ?? null;
+  if (walking && !template) {
+    lines.push(`Strength: no session today; ${repo.workoutDays(ws, ws + 6)} of ${s.strengthSessionsPerWeek} this week.`);
+  } else if (!template) {
     const restLabel = isSunday(day) ? "Sunday, the plan's fixed rest day" : 'a day off (the workout order pauses, nothing is skipped)';
     const next = order.get(day)?.next?.name;
     lines.push(`Training: ${restLabel}.${next ? ` Next workout: ${next}.` : ''}`);
@@ -364,9 +390,14 @@ export function dayReport(day) {
       if (e) lines.push(exerciseLine(e.name, e.measure === Measure.SECONDS, null, logged, previous.get(id) ?? [], null));
     }
   }
-  const weekDone = [0, 1, 2, 3, 4, 5, 6].filter((i) => repo.dayStatus(ws + i, order, plannedSets, today) === DayStatus.DONE).length;
-  const weekPlanned = [0, 1, 2, 3, 4, 5].filter((i) => repo.dailyLog(ws + i).restDay !== true).length;
-  lines.push(`This week so far: ${weekDone} of ${weekPlanned} workouts done.`);
+  if (walking) {
+    const stepDays = [0, 1, 2, 3, 4, 5, 6].map((i) => ws + i).filter((d) => d <= day && (repo.dailyLog(d).steps ?? 0) >= stepsGoalFor(s, d)).length;
+    lines.push(`This week so far: step goal hit on ${stepDays} of ${Math.min(7, day - ws + 1)} days; ${repo.workoutDays(ws, ws + 6)} of ${s.strengthSessionsPerWeek} strength sessions.`);
+  } else {
+    const weekDone = [0, 1, 2, 3, 4, 5, 6].filter((i) => repo.dayStatus(ws + i, order, plannedSets, today) === DayStatus.DONE).length;
+    const weekPlanned = [0, 1, 2, 3, 4, 5].filter((i) => repo.dailyLog(ws + i).restDay !== true).length;
+    lines.push(`This week so far: ${weekDone} of ${weekPlanned} workouts done.`);
+  }
   lines.push('');
 
   const foods = repo.foodEntries(day);
@@ -380,9 +411,9 @@ export function dayReport(day) {
       lines.push(`- ${Meal.of(f.meal).label}: ${f.name}, ${Fmt.num(f.quantity)} ${f.unit}, ${Fmt.int(f.kcal)} kcal, ${Fmt.num(f.protein)} g protein`);
     }
   }
-  lines.push(`Water: ${Fmt.num(log.waterMl / 1000, 2)} L. Steps: ${log.steps != null ? Fmt.int(log.steps) : 'not logged'}. ` +
+  lines.push(`Water: ${Fmt.num(log.waterMl / 1000, 2)} L. Steps: ${log.steps != null ? `${Fmt.int(log.steps)} (goal ${Fmt.int(stepsGoal)})` : 'not logged'}. ` +
     `Sleep last night: ${log.sleepHours != null ? `${Fmt.num(log.sleepHours)} h` : 'not logged'}.`);
-  lines.push(`Creatine: ${log.creatine ? 'taken' : 'not marked'}. No junk food or sugar: ${log.noJunk ? 'yes' : 'not marked'}.`);
+  lines.push(`${s.checklistCreatine === false ? '' : `Creatine: ${log.creatine ? 'taken' : 'not marked'}. `}No junk food or sugar: ${log.noJunk ? 'yes' : 'not marked'}.`);
   const cardio = repo.cardio(day, day);
   if (cardio.length) lines.push(`Cardio: ${cardio.map((c) => `${c.minutes} min ${c.type}`).join(', ')}.`);
   lines.push('');

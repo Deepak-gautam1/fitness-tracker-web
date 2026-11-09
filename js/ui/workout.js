@@ -4,7 +4,7 @@
 import { useState, useEffect } from '../../vendor/preact-htm.js';
 import * as repo from '../repo.js';
 import * as ai from '../ai.js';
-import { Analytics, DayStatus, ExerciseKind, Fmt, Measure, fmtWeight, isSunday, weekStart } from '../domain.js';
+import { Analytics, DayStatus, ExerciseKind, Fmt, Measure, fmtWeight, isSunday, isWalking, weekStart } from '../domain.js';
 import { app, push, selectDay, snack } from './state.js';
 import { startTimer, adjustTimer, skipTimer, timerState, timerFinishedAt, unlockAudio } from './timer.js';
 import {
@@ -23,14 +23,16 @@ function workoutState(day, today) {
   const ws = weekStart(day);
   const planAll = repo.plan();
   const plannedSets = repo.plannedSetsByTemplate(planAll);
-  const order = repo.rotation(ws, ws + 6, today);
+  // The walking plan has no workout order or rest days: two optional sessions a week, A then B.
+  const walking = isWalking(settings);
+  const order = walking ? new Map() : repo.rotation(ws, ws + 6, today);
   const logs = repo.dailyLogMap();
   const session = repo.session(day);
-  const sunday = isSunday(day);
-  const restMarked = logs.get(day)?.restDay === true;
+  const sunday = !walking && isSunday(day);
+  const restMarked = !walking && logs.get(day)?.restDay === true;
   const showRest = session == null && (sunday || restMarked) && !local.trainAnyway.has(day);
   // Training on a rest day starts with the next workout in order.
-  const upNext = order.get(day)?.next ?? null;
+  const upNext = walking ? repo.nextStrengthTemplate(day) : order.get(day)?.next ?? null;
   const templateById = new Map(templates.map((t) => [t.id, t]));
   const template = (session && templateById.get(session.templateId)) || order.get(day)?.workout || upNext || templates[0];
 
@@ -102,11 +104,11 @@ function workoutState(day, today) {
   const cardio = repo.cardio(ws, ws + 6);
   const measureById = new Map(catalog.map((e) => [e.id, e.measure]));
   return {
-    day, isToday: day === today, settings, templates, upNext, template, isSunday: sunday, restMarked, showRest, session,
+    day, isToday: day === today, settings, walking, templates, upNext, template, isSunday: sunday, restMarked, showRest, session,
     status: statusFor(day, template.id), exercises: cards,
     plannedSets: planItems.reduce((a, p) => a + p.sets, 0), doneSets: setsToday.length,
-    weekDone: weekStatuses.filter((x) => x === DayStatus.DONE).length,
-    weekPlanned: [0, 1, 2, 3, 4, 5].filter((i) => logs.get(ws + i)?.restDay !== true).length,
+    weekDone: walking ? repo.workoutDays(ws, ws + 6) : weekStatuses.filter((x) => x === DayStatus.DONE).length,
+    weekPlanned: walking ? settings.strengthSessionsPerWeek : [0, 1, 2, 3, 4, 5].filter((i) => logs.get(ws + i)?.restDay !== true).length,
     catalog, cardioToday: cardio.filter((c) => c.epochDay === day), cardioThisWeek: cardio.length,
     lastSetAt: setsToday.length ? Math.max(...setsToday.map((s) => s.completedAt)) : null,
     pbCount: cards.filter((c) => c.rows.some((r) => r.isPb)).length,
@@ -193,9 +195,11 @@ function SessionHeader({ s, onFinish }) {
   const t = s.template;
   const next = s.upNext;
   const finished = s.session?.finishedAt != null;
-  const label = s.isSunday || s.restMarked ? 'Extra session on a rest day' : next == null || next.id === t.id ? 'Next in order' : `Swapped in for ${next.name}`;
+  const label = s.walking
+    ? `Optional · ${s.settings.strengthSessionsPerWeek} short sessions a week help keep muscle while you lose fat`
+    : s.isSunday || s.restMarked ? 'Extra session on a rest day' : next == null || next.id === t.id ? 'Next in order' : `Swapped in for ${next.name}`;
   return html`<${Card}>
-    <${SectionLabel}>${s.isToday ? "Today's workout" : 'Workout'}<//>
+    <${SectionLabel}>${s.walking ? 'Strength session' : s.isToday ? "Today's workout" : 'Workout'}<//>
     <div class="menu mt4">
       <button class="row" style="background:none;border:0;padding:0;cursor:pointer" onClick=${() => setMenu(!menu)} aria-label="Change workout">
         <span class="big">${t.name.toUpperCase()}</span><${Icon} name="down" />
@@ -216,7 +220,7 @@ function SessionHeader({ s, onFinish }) {
           ? html`<button class="btn small" onClick=${() => { unlockAudio(); repo.startSession(s.day, t.id); }}>Start workout</button>`
           : html`<button class="btn small" onClick=${onFinish}>Finish workout</button>`}
     </div>
-    <div class="tiny mt6">This week ${s.weekDone} / ${s.weekPlanned}</div>
+    <div class="tiny mt6">This week ${s.weekDone} / ${s.weekPlanned}${s.walking ? ' sessions' : ''}</div>
   <//>`;
 }
 

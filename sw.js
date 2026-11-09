@@ -1,7 +1,7 @@
 // Offline support: keeps a copy of the app's files on the phone. Raise VERSION whenever a file
 // changes, so phones pick up the new version the next time the app opens.
 
-const VERSION = 'v1';
+const VERSION = 'v2';
 const CACHE = `fitness-tracker-${VERSION}`;
 const FILES = [
   './',
@@ -30,6 +30,7 @@ const FILES = [
   'js/ui/progress.js',
   'js/ui/photos.js',
   'js/ui/settings.js',
+  'js/ui/setup.js',
 ];
 
 self.addEventListener('install', (event) => {
